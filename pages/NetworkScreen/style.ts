@@ -1,0 +1,65 @@
+import { scaleFont } from "@/constants/ScaleFont";
+import { StyleSheet } from "react-native";
+
+export const styles = StyleSheet.create({
+  conatiner: {
+    flex: 1,
+    justifyContent: "center",
+    alignItems: "center",
+    backgroundColor: "#fff",
+  },
+  btnContainer: {
+    flexDirection: "row",
+    justifyContent: "center",
+    alignItems: "center",
+    gap: 80,
+    marginBottom: 20,
+  },
+  Refreshbtn: {
+    flexDirection: "row",
+    justifyContent: "center",
+    alignItems: "center",
+    backgroundColor: "white",
+    padding: 10,
+    borderColor: "black",
+    borderWidth: 1,
+    gap: 5,
+    width: 100,
+    borderRadius: 10,
+  },
+  Exitbtn: {
+    flexDirection: "row",
+    justifyContent: "center",
+    alignItems: "center",
+    backgroundColor: "white",
+    padding: 10,
+    borderColor: "red",
+    borderWidth: 1,
+    gap: 5,
+    width: 100,
+    borderRadius: 10,
+  },
+  textContainer: {
+    justifyContent: "center",
+    alignItems: "center",
+    marginBottom: 80,
+  },
+  RefreshBtnText: { color: "black", fontSize: scaleFont(16) },
+  ExitBtnText: { color: "red", fontSize: scaleFont(16) },
+  ErrorText: {
+    fontSize: scaleFont(16),
+    fontWeight: "bold",
+    color: "grey",
+    marginTop: 50,
+    textAlign: "center",
+    fontFamily: "Poppins-Ligh",
+  },
+  ErrorText1: {
+    fontSize: scaleFont(16),
+    fontWeight: 500,
+    color: "grey",
+    marginTop: 20,
+    textAlign: "center",
+    fontFamily: "Poppins-Ligh",
+  },
+});
