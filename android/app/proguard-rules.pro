@@ -12,3 +12,15 @@
 -keep class com.facebook.react.turbomodule.** { *; }
 
 # Add any project specific keep options here:
+
+#optional
+
+# Jackson
+-dontwarn com.fasterxml.jackson.core.JsonFactory
+-dontwarn com.fasterxml.jackson.core.JsonGenerator
+-keep class com.fasterxml.jackson.core.** { *; }
+
+# Expo
+-dontwarn expo.modules.kotlin.services.FilePermissionService$Permission
+-dontwarn expo.modules.kotlin.services.FilePermissionService
+-keep class expo.modules.kotlin.services.FilePermissionService** { *; }
