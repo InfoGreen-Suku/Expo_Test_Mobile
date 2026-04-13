@@ -23,6 +23,7 @@
     },
     "plugins": [
       "expo-router",
+      "expo-sqlite",
       [
         "expo-splash-screen",
         {
@@ -44,7 +45,9 @@
       "expo-camera",
       "expo-audio",
       "expo-video",
-      "expo-share-intent"
+      "expo-share-intent",
+      "expo-sqlite",
+      "expo-asset"
     ],
     "experiments": {
       "typedRoutes": true,

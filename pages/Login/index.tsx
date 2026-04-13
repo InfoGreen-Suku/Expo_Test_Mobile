@@ -13,14 +13,22 @@ import {
   View,
 } from "react-native";
 
+import DeviceInfo from "react-native-device-info";
+import { useAuth } from "@/auth/AuthContext";
 import { styles } from "./style";
 export default function Login() {
   const navigation = useNavigation<any>();
+  const { signInLocal } = useAuth();
   const [name, setName] = useState("");
   const [mobileNumber, setMobileNumber] = useState("");
 
   const [mobileNumberError, setMobileNumberError] = useState("");
   const [nameError, setNameError] = useState("");
+  const [deviceID, setDeviceID] = useState("");
+
+  useEffect(() => {
+    getAllDeviceInfo();
+  }, []);
 
   // handle BackButton for moving back to the previous page or exit app.
   useEffect(() => {
@@ -35,13 +43,33 @@ export default function Login() {
     return () => backHandler.remove();
   }, []);
 
-  const handleRegister = () => {
+  const getAllDeviceInfo = async () => {
+    try {
+      const [androidID] = await Promise.all([DeviceInfo.getAndroidId()]);
+      setDeviceID(androidID);
+    } catch (error) {
+      console.error("Error getting device info:", error);
+    }
+  };
+
+  const handleRegister = async () => {
     if (name === "" || mobileNumber === "") {
       setNameError("பெயர் தேவையானவை");
       setMobileNumberError("தொலைபேசி எண் தேவையானவை");
       return;
     }
-    navigation.navigate("Home");
+    const payload = {
+      name,
+      mobileNumber,
+      deviceID,
+    };
+
+    console.log("payload", payload);
+    await signInLocal({
+      name: payload.name,
+      mobileNumber: payload.mobileNumber,
+      deviceId: payload.deviceID,
+    });
   };
 
   return (
@@ -131,7 +159,7 @@ export default function Login() {
               <TouchableHighlight
                 onPress={handleRegister}
                 style={styles.createAccountButton}
-                underlayColor={"#007a2a"}
+                underlayColor={"#1D4ED8"}
               >
                 <Text style={styles.createAccountButtonText}>
                   சமர்ப்பிக்கவும்

@@ -67,6 +67,19 @@ react {
  * Set this to true in release builds to optimize the app using [R8](https://developer.android.com/topic/performance/app-optimization/enable-app-optimization).
  */
 def enableMinifyInReleaseBuilds = (findProperty('android.enableMinifyInReleaseBuilds') ?: false).toBoolean()
+def generatedBundledDbAssetsDir = file("$buildDir/generated/bundled-voters-db-assets")
+
+tasks.register("copyBundledVotersDb", Copy) {
+    from(file("$projectRoot/voters.db"))
+    into(generatedBundledDbAssetsDir)
+    include("voters.db")
+
+    doFirst {
+        if (!file("$projectRoot/voters.db").exists()) {
+            throw new GradleException("Missing voters.db at project root: $projectRoot/voters.db")
+        }
+    }
+}
 
 /**
  * The preferred build flavor of JavaScriptCore (JSC)
@@ -138,6 +151,15 @@ android {
     androidResources {
         ignoreAssetsPattern '!.svn:!.git:!.ds_store:!*.scc:!CVS:!thumbs.db:!picasa.ini:!*~'
     }
+    sourceSets {
+        main {
+            assets.srcDirs += [generatedBundledDbAssetsDir]
+        }
+    }
+}
+
+tasks.named("preBuild").configure {
+    dependsOn("copyBundledVotersDb")
 }
 
 // Apply static values from `gradle.properties` to the `android.packagingOptions`

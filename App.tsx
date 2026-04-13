@@ -1,3 +1,4 @@
+import { AuthProvider, useAuth } from "@/auth/AuthContext";
 import store from "@/redux/store";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import {
@@ -5,7 +6,7 @@ import {
   DarkTheme,
   DefaultTheme,
   NavigationContainer,
-  ThemeProvider
+  ThemeProvider,
 } from "@react-navigation/native";
 import { ShareIntentProvider } from "expo-share-intent";
 import { StatusBar } from "expo-status-bar";
@@ -13,8 +14,12 @@ import { useEffect, useRef } from "react";
 import { Text, TextInput, useColorScheme, View } from "react-native";
 import { LogLevel, OneSignal } from "react-native-onesignal";
 import "react-native-reanimated";
-import { SafeAreaProvider, useSafeAreaInsets } from "react-native-safe-area-context";
-import { Provider, useSelector } from "react-redux";
+import {
+  SafeAreaProvider,
+  useSafeAreaInsets,
+} from "react-native-safe-area-context";
+import { Provider } from "react-redux";
+import AuthStackNavigator from "./app/AuthStackNavigator";
 import MainNavigator from "./app/MainNavigator";
 
 // You can remove this if you don't need to wait for any assets
@@ -25,12 +30,12 @@ import MainNavigator from "./app/MainNavigator";
 if ((Text as any).defaultProps == null) (Text as any).defaultProps = {};
 (Text as any).defaultProps.allowFontScaling = false;
 (Text as any).defaultProps.maxFontSizeMultiplier = 1;
-if ((TextInput as any).defaultProps == null) (TextInput as any).defaultProps = {};
+if ((TextInput as any).defaultProps == null)
+  (TextInput as any).defaultProps = {};
 (TextInput as any).defaultProps.allowFontScaling = false;
 (TextInput as any).defaultProps.maxFontSizeMultiplier = 1;
 
 export default function RootLayout() {
-
   // const requestPermissions = async () => {
   //   await ensureOverlayPermission();
   //   await ensureExactAlarmPermission();
@@ -42,13 +47,13 @@ export default function RootLayout() {
   return (
     <Provider store={store}>
       <ShareIntentProvider>
-
         <SafeAreaProvider>
-          <Root />
+          <AuthProvider>
+            <Root />
+          </AuthProvider>
         </SafeAreaProvider>
       </ShareIntentProvider>
     </Provider>
-
   );
 }
 
@@ -56,7 +61,7 @@ function Root() {
   const colorScheme = useColorScheme();
   const insets = useSafeAreaInsets();
   const navigationRef = useRef<any>(null);
-  const userData = useSelector((state: any) => state.user.userData);
+  const { user } = useAuth();
 
   useEffect(() => {
     OneSignal.Debug.setLogLevel(LogLevel.Verbose);
@@ -64,11 +69,11 @@ function Root() {
     OneSignal.User.pushSubscription
       .getIdAsync()
       .then((subscriptionId: any) => {
-        AsyncStorage.setItem('subscriptionId', subscriptionId);
+        AsyncStorage.setItem("subscriptionId", subscriptionId);
         // You can use this ID to identify the user or send it to your server
       })
-      .catch(error => {
-        console.log('Failed to get subscription ID:', error);
+      .catch((error) => {
+        console.log("Failed to get subscription ID:", error);
       });
     OneSignal.Notifications.addEventListener("click", (event: any) => {
       const navigationData = event.notification.additionalData.navigation;
@@ -84,16 +89,12 @@ function Root() {
       }
     });
   }, []);
-
-  useEffect(() => {
-    console.log("userData in app.tsx", userData);
-  }, [userData]);
   const navigateToScreen = (
     screenName: any,
     userId: any,
     sessionId: any,
     URL: any,
-    Name: any
+    Name: any,
   ) => {
     const navigation = navigationRef.current;
     if (navigation) {
@@ -112,12 +113,12 @@ function Root() {
     <ThemeProvider value={colorScheme === "dark" ? DarkTheme : DefaultTheme}>
       <View style={{ flex: 1 }}>
         <StatusBar style="light" />
-        <View style={{ height: insets.top, backgroundColor: '#008541' }} />
+        <View style={{ height: insets.top, backgroundColor: "#2563EB" }} />
         <NavigationContainer>
-          <MainNavigator />
+          {user ? <MainNavigator /> : <AuthStackNavigator />}
         </NavigationContainer>
         <View style={{ height: insets.bottom }} />
       </View>
     </ThemeProvider>
-  )
+  );
 }

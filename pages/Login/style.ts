@@ -5,7 +5,7 @@ const ScreenHeight = Dimensions.get("window").height;
 export const styles = StyleSheet.create({
   background: {
     flex: 1,
-    backgroundColor: "#F0FDF4",
+    backgroundColor: "#EFF6FF",
   },
   scrollContent: {
     flexGrow: 1,
@@ -43,7 +43,7 @@ export const styles = StyleSheet.create({
   cardTitle: {
     fontSize: scaleFont(24),
     fontWeight: "900",
-    color: "#052E16",
+    color: "#1E3A8A",
     textAlign: "center",
     fontFamily: "Poppins-Light",
   },
@@ -51,7 +51,7 @@ export const styles = StyleSheet.create({
     marginTop: 8,
     fontSize: scaleFont(13.5),
     lineHeight: scaleFont(19),
-    color: "#166534",
+    color: "#1D4ED8",
     textAlign: "center",
     fontFamily: "Poppins-Light",
   },
@@ -63,7 +63,7 @@ export const styles = StyleSheet.create({
   },
   inputLabel: {
     fontSize: scaleFont(15),
-    color: "#14532D",
+    color: "#1E3A8A",
     fontFamily: "Poppins-Light",
     fontWeight: "bold",
     marginBottom: 8,
@@ -99,7 +99,7 @@ export const styles = StyleSheet.create({
     fontFamily: "Poppins-Light",
   },
   createAccountButton: {
-    backgroundColor: "#16A34A",
+    backgroundColor: "#2563EB",
     borderRadius: 12,
     paddingVertical: 14,
     alignItems: "center",
@@ -141,7 +141,7 @@ export const styles = StyleSheet.create({
     alignItems: "center",
     marginBottom: 25,
     borderWidth: 1,
-    borderColor: "#009333",
+    borderColor: "#2563EB",
     // marginTop: 10,
   },
   scanQRButtonContent: {
@@ -149,7 +149,7 @@ export const styles = StyleSheet.create({
     alignItems: "center",
   },
   scanQRButtonText: {
-    color: "#008541",
+    color: "#2563EB",
     fontSize: scaleFont(15),
     fontWeight: "600",
     marginLeft: 8,
@@ -167,7 +167,7 @@ export const styles = StyleSheet.create({
     fontFamily: "Poppins-Light",
   },
   loginLink: {
-    color: "#008541",
+    color: "#2563EB",
     fontSize: scaleFont(14),
     fontWeight: "bold",
     fontFamily: "Poppins-Light",
@@ -209,7 +209,7 @@ export const styles = StyleSheet.create({
   cameraContainer: {
     flex: 1,
     justifyContent: "center",
-    backgroundColor: "#008541",
+    backgroundColor: "#1D4ED8",
   },
   cameraPreview: {
     width: ScreenWidth,
@@ -238,7 +238,7 @@ export const styles = StyleSheet.create({
     justifyContent: "space-between",
     alignItems: "center",
     padding: 10,
-    backgroundColor: "#008541",
+    backgroundColor: "#1D4ED8",
     width: ScreenWidth,
     zIndex: 1,
     marginTop: ScreenHeight * 0.05,
@@ -266,7 +266,7 @@ export const styles = StyleSheet.create({
     justifyContent: "center",
     alignItems: "center",
     borderWidth: 3,
-    borderColor: "#008541",
+    borderColor: "#2563EB",
     borderRadius: 20,
   },
   uploadButtonWrapper: {

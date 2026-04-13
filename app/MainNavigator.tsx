@@ -1,7 +1,6 @@
 import ApiLogsScreen from "@/pages/ApiLogsScreen";
 import CameraScreen from "@/pages/CameraScreen";
 import Home from "@/pages/Home";
-import Login from "@/pages/Login";
 import Network from "@/pages/NetworkScreen";
 import OpenLink from "@/pages/OpenLinkScreen";
 import PDF from "@/pages/PDF";
@@ -11,24 +10,24 @@ import Pin from "@/pages/PinScreen";
 import Print from "@/pages/Print";
 import Record from "@/pages/RecordScreen";
 import Sharedfile from "@/pages/SharedFileScreen";
-import TermsAndConditions from "@/pages/terms&conditions";
 import VerificationScreen from "@/pages/VerificationScreen";
 import Webview from "@/pages/Webview";
 import { createNativeStackNavigator } from "@react-navigation/native-stack";
 
 const MainStack = createNativeStackNavigator();
+
 export default function MainNavigator() {
   return (
     <MainStack.Navigator
       screenOptions={{ headerShown: false }}
-      initialRouteName={"TermsAndConditions"}
+      initialRouteName={"Home"}
     >
       <MainStack.Screen name="PendingScreen" component={PendingScreen} />
-      <MainStack.Screen
+      {/* <MainStack.Screen
         name="TermsAndConditions"
         component={TermsAndConditions}
-      />
-      <MainStack.Screen name="Login" component={Login} />
+      /> */}
+      {/* <MainStack.Screen name="Login" component={Login} /> */}
       <MainStack.Screen name="Home" component={Home} />
       <MainStack.Screen name="PermissionScreen" component={PermissionScreen} />
       <MainStack.Screen
