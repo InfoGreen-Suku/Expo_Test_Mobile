@@ -1,47 +1,68 @@
-import React, { createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
-import { getLatestLocalUser, insertLocalUser, type LocalUserRow } from "@/sqlite/authDb";
+import AsyncStorage from "@react-native-async-storage/async-storage";
+import React, {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useState,
+} from "react";
+
+const AUTH_USER_STORAGE_KEY = "authUser";
 
 type AuthUser = {
   name: string;
   mobileNumber: string;
   deviceId: string;
+  userType: "user" | "admin";
 };
 
 type AuthContextValue = {
   user: AuthUser | null;
   initializing: boolean;
-  refreshFromDb: () => Promise<void>;
+  refreshFromStorage: () => Promise<void>;
   signInLocal: (input: AuthUser) => Promise<void>;
   signOutLocal: () => Promise<void>;
 };
 
 const AuthContext = createContext<AuthContextValue | null>(null);
 
-function rowToAuthUser(row: LocalUserRow): AuthUser {
-  return {
-    name: row.name,
-    mobileNumber: row.mobileNumber,
-    deviceId: row.deviceId,
-  };
-}
-
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [user, setUser] = useState<AuthUser | null>(null);
   const [initializing, setInitializing] = useState(true);
 
-  const refreshFromDb = useCallback(async () => {
-    const latest = await getLatestLocalUser();
-    setUser(latest ? rowToAuthUser(latest) : null);
+  const refreshFromStorage = useCallback(async () => {
+    const raw = await AsyncStorage.getItem(AUTH_USER_STORAGE_KEY);
+    if (!raw) {
+      setUser(null);
+      return;
+    }
+    try {
+      const parsed = JSON.parse(raw) as Partial<AuthUser>;
+      const next: AuthUser | null =
+        typeof parsed?.name === "string" &&
+        typeof parsed?.mobileNumber === "string" &&
+        typeof parsed?.deviceId === "string"
+          ? {
+              name: parsed.name,
+              mobileNumber: parsed.mobileNumber,
+              deviceId: parsed.deviceId,
+              userType: parsed.userType === "admin" ? "admin" : "user",
+            }
+          : null;
+      setUser(next);
+    } catch {
+      setUser(null);
+    }
   }, []);
 
   const signInLocal = useCallback(async (input: AuthUser) => {
-    const row = await insertLocalUser(input);
-    setUser(rowToAuthUser(row));
+    await AsyncStorage.setItem(AUTH_USER_STORAGE_KEY, JSON.stringify(input));
+    setUser(input);
   }, []);
 
   const signOutLocal = useCallback(async () => {
-    // If you want a "logout", we simply clear in-memory user.
-    // (We can also delete DB rows, but keeping history can be useful.)
+    await AsyncStorage.removeItem(AUTH_USER_STORAGE_KEY);
     setUser(null);
   }, []);
 
@@ -49,7 +70,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     let cancelled = false;
     (async () => {
       try {
-        await refreshFromDb();
+        await refreshFromStorage();
       } finally {
         if (!cancelled) setInitializing(false);
       }
@@ -57,17 +78,17 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     return () => {
       cancelled = true;
     };
-  }, [refreshFromDb]);
+  }, [refreshFromStorage]);
 
   const value = useMemo<AuthContextValue>(
     () => ({
       user,
       initializing,
-      refreshFromDb,
+      refreshFromStorage,
       signInLocal,
       signOutLocal,
     }),
-    [user, initializing, refreshFromDb, signInLocal, signOutLocal],
+    [user, initializing, refreshFromStorage, signInLocal, signOutLocal],
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
@@ -78,4 +99,3 @@ export function useAuth() {
   if (!ctx) throw new Error("useAuth must be used within AuthProvider");
   return ctx;
 }
-

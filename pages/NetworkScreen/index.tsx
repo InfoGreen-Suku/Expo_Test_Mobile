@@ -39,7 +39,7 @@ export default function Network() {
 
   const handlerefresh = async () => {
     try {
-      const savedUserDetails = await AsyncStorage.getItem("userData");
+      const savedUserDetails = await AsyncStorage.getItem("authUser");
       if (savedUserDetails === null) {
         navigation.navigate("Login");
       } else {

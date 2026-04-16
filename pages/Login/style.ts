@@ -61,6 +61,37 @@ export const styles = StyleSheet.create({
   inputWrapper: {
     marginBottom: 16,
   },
+  userTypeToggle: {
+    flexDirection: "row",
+    backgroundColor: "#F3F4F6",
+    borderRadius: 14,
+    padding: 4,
+    borderWidth: 1,
+    borderColor: "#E5E7EB",
+  },
+  userTypeOption: {
+    flex: 1,
+    height: 44,
+    borderRadius: 12,
+    backgroundColor: "transparent",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  userTypeOptionSelected: {
+    backgroundColor: "#2563EB",
+  },
+  userTypeOptionPressed: {
+    opacity: 0.92,
+  },
+  userTypeOptionText: {
+    color: "#1F2937",
+    fontSize: scaleFont(14.5),
+    fontWeight: "800",
+    fontFamily: "Poppins-Light",
+  },
+  userTypeOptionTextSelected: {
+    color: "#FFFFFF",
+  },
   inputLabel: {
     fontSize: scaleFont(15),
     color: "#1E3A8A",
@@ -299,4 +330,4 @@ export const styles = StyleSheet.create({
     textAlign: "center",
     fontWeight: "900",
   },
-});
+}) as any;

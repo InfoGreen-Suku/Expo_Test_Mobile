@@ -6,6 +6,7 @@ import {
   BackHandler,
   KeyboardAvoidingView,
   Platform,
+  Pressable,
   ScrollView,
   Text,
   TextInput,
@@ -13,17 +14,20 @@ import {
   View,
 } from "react-native";
 
-import DeviceInfo from "react-native-device-info";
 import { useAuth } from "@/auth/AuthContext";
+import DeviceInfo from "react-native-device-info";
 import { styles } from "./style";
 export default function Login() {
   const navigation = useNavigation<any>();
   const { signInLocal } = useAuth();
+  const s = styles as any;
   const [name, setName] = useState("");
   const [mobileNumber, setMobileNumber] = useState("");
+  const [userType, setUserType] = useState<"user" | "admin">("user");
 
   const [mobileNumberError, setMobileNumberError] = useState("");
   const [nameError, setNameError] = useState("");
+  const [userTypeError, setUserTypeError] = useState("");
   const [deviceID, setDeviceID] = useState("");
 
   useEffect(() => {
@@ -58,6 +62,28 @@ export default function Login() {
       setMobileNumberError("தொலைபேசி எண் தேவையானவை");
       return;
     }
+    if (mobileNumber.trim().length !== 10) {
+      setMobileNumberError("தொலைபேசி எண்ணைச் சரிபார்க்கவும்");
+      return;
+    }
+
+    // Admin-only restriction (User has no restriction)
+    if (userType === "admin") {
+      const DEFAULT_ADMIN = {
+        name: "admin",
+        mobileNumber: "9874563210",
+      } as const;
+
+      const nameOk =
+        name.trim().toLowerCase() === DEFAULT_ADMIN.name.toLowerCase();
+      const mobileOk = mobileNumber.trim() === DEFAULT_ADMIN.mobileNumber;
+
+      if (!nameOk || !mobileOk) {
+        setUserTypeError("Admin விவரங்கள் தவறாக உள்ளது");
+        return;
+      }
+    }
+
     const payload = {
       name,
       mobileNumber,
@@ -69,6 +95,7 @@ export default function Login() {
       name: payload.name,
       mobileNumber: payload.mobileNumber,
       deviceId: payload.deviceID,
+      userType,
     });
   };
 
@@ -94,6 +121,61 @@ export default function Login() {
             </View>
 
             <View style={styles.formContainer}>
+              <View style={styles.inputWrapper}>
+                <View style={s.userTypeToggle}>
+                  <Pressable
+                    style={({ pressed }) => [
+                      s.userTypeOption,
+                      userType === "user" && s.userTypeOptionSelected,
+                      pressed && s.userTypeOptionPressed,
+                    ]}
+                    onPress={() => {
+                      setUserType("user");
+                      setName("");
+                      setMobileNumber("");
+                      setUserTypeError("");
+                      setNameError("");
+                      setMobileNumberError("");
+                    }}
+                  >
+                    <Text
+                      style={[
+                        s.userTypeOptionText,
+                        userType === "user" && s.userTypeOptionTextSelected,
+                      ]}
+                    >
+                      User
+                    </Text>
+                  </Pressable>
+                  <Pressable
+                    style={({ pressed }) => [
+                      s.userTypeOption,
+                      userType === "admin" && s.userTypeOptionSelected,
+                      pressed && s.userTypeOptionPressed,
+                    ]}
+                    onPress={() => {
+                      setUserType("admin");
+                      setName("");
+                      setMobileNumber("");
+                      setUserTypeError("");
+                      setNameError("");
+                      setMobileNumberError("");
+                    }}
+                  >
+                    <Text
+                      style={[
+                        s.userTypeOptionText,
+                        userType === "admin" && s.userTypeOptionTextSelected,
+                      ]}
+                    >
+                      Admin
+                    </Text>
+                  </Pressable>
+                </View>
+                {userTypeError ? (
+                  <Text style={styles.errorText}>{userTypeError}</Text>
+                ) : null}
+              </View>
               {/* Name Input */}
               <View style={styles.inputWrapper}>
                 <Text style={styles.inputLabel}>பெயர்</Text>
@@ -113,6 +195,7 @@ export default function Login() {
                     onChangeText={(text) => {
                       setName(text);
                       setNameError("");
+                      setUserTypeError("");
                     }}
                     onFocus={() => setNameError("")}
                   />
@@ -145,6 +228,7 @@ export default function Login() {
                         .slice(0, 10);
                       setMobileNumber(filteredText);
                       setMobileNumberError("");
+                      setUserTypeError("");
                     }}
                     maxLength={10}
                     onFocus={() => setMobileNumberError("")}

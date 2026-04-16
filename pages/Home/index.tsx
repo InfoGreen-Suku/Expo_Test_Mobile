@@ -1,12 +1,15 @@
+import { useAuth } from "@/auth/AuthContext";
 import {
   getDistinctBhagNos,
   getVoterBySr,
   markVoterVerified,
 } from "@/sqlite/votersDb";
+import { transliterateLatinToTamil } from "@/utils/transliterateToTamil";
 import Feather from "@expo/vector-icons/Feather";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import React, { useEffect, useMemo, useState } from "react";
 import {
+  ActivityIndicator,
   KeyboardAvoidingView,
   Modal,
   Platform,
@@ -20,18 +23,71 @@ import {
 
 const SELECTED_BOOTH_STORAGE_KEY = "selectedBoothNumber";
 const BOOTH_NUMBERS_STORAGE_KEY = "boothNumbersList";
+const AUTH_USER_STORAGE_KEY = "authUser";
+
+function formatBilingualName(tamil: unknown, english: unknown): string {
+  const clean = (value: unknown) =>
+    value == null
+      ? ""
+      : String(value)
+          .replace(/\s*-\s*$/, "") // remove trailing "-" from source data
+          .trim();
+
+  const ta = clean(tamil);
+  const en = clean(english);
+
+  if (ta && en) return `${ta} (${en})`;
+  if (ta) return ta;
+  if (en) return en;
+  return "-";
+}
+
+function formatDateTime12h(date: Date): string {
+  const dd = String(date.getDate()).padStart(2, "0");
+  const mm = String(date.getMonth() + 1).padStart(2, "0");
+  const yyyy = String(date.getFullYear());
+
+  let hours = date.getHours();
+  const minutes = String(date.getMinutes()).padStart(2, "0");
+  const ampm = hours >= 12 ? "PM" : "AM";
+  hours = hours % 12;
+  if (hours === 0) hours = 12;
+  const hh = String(hours).padStart(2, "0");
+
+  // Example: 16-04-2026 10:59 AM
+  return `${dd}-${mm}-${yyyy} ${hh}:${minutes} ${ampm}`;
+}
+
+function maskVoterId(value: unknown) {
+  const raw = value == null ? "" : String(value).trim();
+  if (!raw) return "X";
+  // If too short to have a "middle 3", don't mask.
+  if (raw.length <= 3) return raw;
+
+  const maskLen = Math.min(3, raw.length);
+  const start = Math.floor((raw.length - maskLen) / 2);
+  const end = start + maskLen;
+  return `${raw.slice(0, start)}${"X".repeat(maskLen)}${raw.slice(end)}`;
+}
 
 export default function Home() {
+  const { signOutLocal } = useAuth();
   const [numberValue, setNumberValue] = useState("");
   const [verified, setVerified] = useState(false);
   const [markedVerified, setMarkedVerified] = useState(false);
+  const [isMarkingVerified, setIsMarkingVerified] = useState(false);
   const [justVerified, setJustVerified] = useState(false);
   const [matchedVoter, setMatchedVoter] = useState<any | null>(null);
   const [boothNumbers, setBoothNumbers] = useState<string[]>([]);
   const [selectedBoothNumber, setSelectedBoothNumber] = useState("");
   const [isBoothModalVisible, setIsBoothModalVisible] = useState(false);
+  const [isNoDataModalVisible, setIsNoDataModalVisible] = useState(false);
   const [isLoadingBooths, setIsLoadingBooths] = useState(false);
   const [boothSearchValue, setBoothSearchValue] = useState("");
+  const [nameTamilScript, setNameTamilScript] = useState<string | null>(null);
+  const [relationNameTamilScript, setRelationNameTamilScript] = useState<
+    string | null
+  >(null);
 
   const canSubmit = useMemo(
     () =>
@@ -60,7 +116,6 @@ export default function Home() {
           AsyncStorage.getItem(SELECTED_BOOTH_STORAGE_KEY),
           AsyncStorage.getItem(BOOTH_NUMBERS_STORAGE_KEY),
         ]);
-
         if (storedBoothNumber) {
           setSelectedBoothNumber(storedBoothNumber);
         }
@@ -78,6 +133,46 @@ export default function Home() {
 
     void loadSavedBoothState();
   }, []);
+
+  useEffect(() => {
+    if (!matchedVoter) {
+      setNameTamilScript(null);
+      setRelationNameTamilScript(null);
+      return;
+    }
+
+    const nameRaw = matchedVoter.Name != null ? String(matchedVoter.Name) : "";
+    const relationRaw =
+      matchedVoter.Father_Name != null ? String(matchedVoter.Father_Name) : "";
+
+    let cancelled = false;
+
+    void (async () => {
+      try {
+        const [nameTa, relationTa] = await Promise.all([
+          nameRaw.trim()
+            ? transliterateLatinToTamil(nameRaw)
+            : Promise.resolve(null),
+          relationRaw.trim()
+            ? transliterateLatinToTamil(relationRaw)
+            : Promise.resolve(null),
+        ]);
+        if (!cancelled) {
+          setNameTamilScript(nameTa);
+          setRelationNameTamilScript(relationTa);
+        }
+      } catch {
+        if (!cancelled) {
+          setNameTamilScript(null);
+          setRelationNameTamilScript(null);
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [matchedVoter]);
 
   const loadBoothNumbers = async () => {
     if (boothNumbers.length > 0 || isLoadingBooths) return;
@@ -139,41 +234,83 @@ export default function Home() {
     if (Number.isNaN(sr)) return;
 
     try {
+      setIsNoDataModalVisible(false);
       const row = await getVoterBySr(sr, selectedBoothNumber);
       console.log("matched voter by sr:", sr, row);
+
+      if (!row) {
+        setMatchedVoter(null);
+        setMarkedVerified(false);
+        setJustVerified(false);
+        setVerified(false);
+        setIsNoDataModalVisible(true);
+        return;
+      }
+
       setMatchedVoter(row);
       setMarkedVerified(Number(row?.status ?? 0) === 1);
       setJustVerified(false);
+      setVerified(true);
     } catch (e) {
       console.log("Failed to read voter by sr:", e);
       setMatchedVoter(null);
       setMarkedVerified(false);
       setJustVerified(false);
-    } finally {
-      setVerified(true);
+      setVerified(false);
     }
   };
 
   const handleMarkVerified = async () => {
-    if (!matchedVoter || isMatchedVoterVerified) return;
+    if (!matchedVoter || isMatchedVoterVerified || isMarkingVerified) return;
 
     const sr = Number.parseInt(String(matchedVoter.sr ?? numberValue), 10);
     if (Number.isNaN(sr) || !selectedBoothNumber) return;
 
     try {
-      await markVoterVerified(sr, selectedBoothNumber);
+      const authRaw = await AsyncStorage.getItem(AUTH_USER_STORAGE_KEY);
+      const auth = authRaw ? (JSON.parse(authRaw) as any) : null;
+      const userName =
+        auth && typeof auth.name === "string" ? auth.name : undefined;
+      const deviceId =
+        auth && typeof auth.deviceId === "string" ? auth.deviceId : undefined;
+      const verifiedAt = formatDateTime12h(new Date());
+
+      // Optimistic UI update (so it reflects immediately)
+      setIsMarkingVerified(true);
+      setMarkedVerified(true);
+      setJustVerified(true);
       setMatchedVoter((prev: any) =>
         prev
           ? {
               ...prev,
               status: 1,
+              verified_by_name: userName ?? prev.verified_by_name,
+              verified_by_device_id: deviceId ?? prev.verified_by_device_id,
+              verified_at: verifiedAt,
             }
           : prev,
       );
-      setMarkedVerified(true);
-      setJustVerified(true);
+
+      await markVoterVerified(sr, selectedBoothNumber, {
+        userName,
+        deviceId,
+        verifiedAt,
+      });
     } catch (error) {
       console.log("Failed to update voter verification status:", error);
+      // Roll back optimistic state if the DB update failed
+      setMarkedVerified(false);
+      setJustVerified(false);
+      setMatchedVoter((prev: any) =>
+        prev
+          ? {
+              ...prev,
+              status: 0,
+            }
+          : prev,
+      );
+    } finally {
+      setIsMarkingVerified(false);
     }
   };
 
@@ -183,6 +320,17 @@ export default function Home() {
     setMarkedVerified(false);
     setJustVerified(false);
     setMatchedVoter(null);
+    setNameTamilScript(null);
+    setRelationNameTamilScript(null);
+    setIsNoDataModalVisible(false);
+  };
+
+  const handleLogout = async () => {
+    try {
+      await AsyncStorage.multiRemove([SELECTED_BOOTH_STORAGE_KEY, "authUser"]);
+    } finally {
+      await signOutLocal();
+    }
   };
 
   return (
@@ -192,14 +340,24 @@ export default function Home() {
         style={styles.flex}
         behavior={Platform.OS === "ios" ? "padding" : undefined}
       >
-        <ScrollView
-          contentContainerStyle={styles.content}
-          keyboardShouldPersistTaps="handled"
-          showsVerticalScrollIndicator={false}
-        >
+        <View style={styles.content}>
           <View style={styles.stack}>
             <View style={styles.hero}>
-              <Text style={styles.heroTitle}>Home</Text>
+              <View style={styles.heroTopRow}>
+                <Text style={styles.heroTitle}>Home</Text>
+                <Pressable
+                  style={({ pressed }) => [
+                    styles.logoutButton,
+                    pressed && styles.logoutButtonPressed,
+                  ]}
+                  onPress={() => void handleLogout()}
+                  accessibilityRole="button"
+                >
+                  <Feather name="log-out" size={18} color="#FFFFFF" />
+                  <Text style={styles.logoutButtonText}>Logout</Text>
+                </Pressable>
+              </View>
+
               <Text style={styles.heroSubtitle}>
                 {verified
                   ? "உங்கள் விவரங்களை சரிபார்க்க கீழே உள்ள தகவல்கள் சரியாக உள்ளதா என்பதை உறுதிப்படுத்தவும்."
@@ -209,102 +367,134 @@ export default function Home() {
 
             {verified ? (
               <View style={styles.card}>
-                <View style={styles.cardBody}>
-                  <View style={styles.row}>
-                    <Text style={styles.label}>பெயர்</Text>
-                    <Text style={[styles.value, styles.prominentValue]}>
-                      {matchedVoter?.Name ?? "-"}
-                    </Text>
-                  </View>
-                  <View style={styles.divider} />
-                  <View style={styles.row}>
-                    <Text style={styles.label}>வாக்காளர் அடையாள எண்</Text>
-                    <Text style={[styles.value, styles.prominentValue]}>
-                      {matchedVoter?.Number ?? "-"}
-                    </Text>
-                  </View>
-
-                  {matchedVoter?.Relation === "Father" && (
-                    <>
-                      <View style={styles.divider} />
-                      <View style={styles.row}>
-                        <Text style={styles.label}>தந்தை பெயர்</Text>
-                        <Text style={styles.value}>
-                          {matchedVoter?.Father_Name}
+                <ScrollView
+                  style={styles.cardBody}
+                  contentContainerStyle={styles.cardScrollContent}
+                  keyboardShouldPersistTaps="handled"
+                  showsVerticalScrollIndicator={false}
+                  stickyHeaderIndices={[0]}
+                >
+                  <View style={styles.cardStickyHeader}>
+                    {isMatchedVoterVerified ? (
+                      <View style={styles.verifiedBanner}>
+                        <View style={styles.verifiedBannerIcon}>
+                          <Feather name="check" size={16} color="#FFFFFF" />
+                        </View>
+                        <Text style={styles.verifiedBannerText}>
+                          {verifiedDisplayText}
                         </Text>
                       </View>
-                    </>
-                  )}
-                  {matchedVoter?.Relation === "Husband" && (
-                    <>
-                      <View style={styles.divider} />
-                      <View style={styles.row}>
-                        <Text style={styles.label}>கணவர் பெயர்</Text>
-                        <Text style={styles.value}>
-                          {matchedVoter?.Father_Name}
-                        </Text>
-                      </View>
-                    </>
-                  )}
-                  {matchedVoter?.Relation === "Mother" && (
-                    <>
-                      <View style={styles.divider} />
-                      <View style={styles.row}>
-                        <Text style={styles.label}>தாய் பெயர்</Text>
-                        <Text style={styles.value}>
-                          {matchedVoter.Father_Name}
-                        </Text>
-                      </View>
-                    </>
-                  )}
-                  <View style={styles.divider} />
-
-                  <View style={styles.row}>
-                    <Text style={styles.label}>வயது</Text>
-                    <Text style={styles.value}>{matchedVoter?.age ?? "-"}</Text>
+                    ) : null}
                   </View>
-
-                  <View style={styles.divider} />
-                  <View style={styles.row}>
-                    <Text style={styles.label}>பாலினம்</Text>
-                    <Text style={styles.value}>{matchedVoter?.sex ?? "-"}</Text>
-                  </View>
-
-                  {isMatchedVoterVerified ? (
-                    <View style={styles.verifiedSuccessWrap}>
-                      <View style={styles.verifiedSuccessCircle}>
-                        <Feather name="check" size={38} color="#FFFFFF" />
-                      </View>
-                      <Text style={styles.verifiedSuccessTitle}>
-                        {verifiedDisplayText}
+                  <View style={styles.fieldList}>
+                    <View style={styles.fieldCard}>
+                      <Text style={styles.fieldLabel}>பெயர்</Text>
+                      <Text style={[styles.fieldValue, styles.prominentValue]}>
+                        {formatBilingualName(
+                          nameTamilScript,
+                          matchedVoter?.Name,
+                        )}
                       </Text>
                     </View>
-                  ) : null}
-                </View>
+
+                    <View style={styles.fieldCard}>
+                      <Text style={styles.fieldLabel}>
+                        வாக்காளர் அடையாள எண்
+                      </Text>
+                      <Text style={[styles.fieldValue, styles.prominentValue]}>
+                        {maskVoterId(matchedVoter?.Number)}
+                      </Text>
+                    </View>
+
+                    {matchedVoter?.Relation === "Father" ? (
+                      <View style={styles.fieldCard}>
+                        <Text style={styles.fieldLabel}>தந்தை பெயர்</Text>
+                        <Text style={styles.fieldValue}>
+                          {formatBilingualName(
+                            relationNameTamilScript,
+                            matchedVoter?.Father_Name,
+                          )}
+                        </Text>
+                      </View>
+                    ) : null}
+
+                    {matchedVoter?.Relation === "Husband" ? (
+                      <View style={styles.fieldCard}>
+                        <Text style={styles.fieldLabel}>கணவர் பெயர்</Text>
+                        <Text style={styles.fieldValue}>
+                          {formatBilingualName(
+                            relationNameTamilScript,
+                            matchedVoter?.Father_Name,
+                          )}
+                        </Text>
+                      </View>
+                    ) : null}
+
+                    {matchedVoter?.Relation === "Mother" ? (
+                      <View style={styles.fieldCard}>
+                        <Text style={styles.fieldLabel}>தாய் பெயர்</Text>
+                        <Text style={styles.fieldValue}>
+                          {formatBilingualName(
+                            relationNameTamilScript,
+                            matchedVoter?.Father_Name,
+                          )}
+                        </Text>
+                      </View>
+                    ) : null}
+
+                    <View style={styles.fieldCard}>
+                      <Text style={styles.fieldLabel}>வயது</Text>
+                      <Text style={styles.fieldValue}>
+                        {matchedVoter?.age ?? "-"}
+                      </Text>
+                    </View>
+
+                    <View style={styles.fieldCard}>
+                      <Text style={styles.fieldLabel}>பாலினம்</Text>
+                      <Text style={styles.fieldValue}>
+                        {matchedVoter?.sex === "Male"
+                          ? "ஆண்"
+                          : matchedVoter?.sex === "Female"
+                            ? "பெண்"
+                            : "-"}
+                      </Text>
+                    </View>
+                  </View>
+                </ScrollView>
 
                 <View style={styles.actions}>
                   <Pressable
-                    disabled={isMatchedVoterVerified}
+                    disabled={isMatchedVoterVerified || isMarkingVerified}
                     style={({ pressed }) => [
                       styles.badge,
                       isMatchedVoterVerified && styles.badgeDisabled,
-                      pressed && !isMatchedVoterVerified && styles.badgePressed,
+                      (isMatchedVoterVerified || isMarkingVerified) &&
+                        styles.badgeDisabled,
+                      pressed &&
+                        !isMatchedVoterVerified &&
+                        !isMarkingVerified &&
+                        styles.badgePressed,
                     ]}
                     onPress={() => {
                       void handleMarkVerified();
                     }}
                     accessibilityRole="button"
-                    accessibilityState={{ disabled: isMatchedVoterVerified }}
+                    accessibilityState={{
+                      disabled: isMatchedVoterVerified || isMarkingVerified,
+                    }}
                   >
                     <Text
                       style={[
                         styles.badgeText,
-                        isMatchedVoterVerified && styles.badgeTextDisabled,
+                        (isMatchedVoterVerified || isMarkingVerified) &&
+                          styles.badgeTextDisabled,
                       ]}
                     >
                       {isMatchedVoterVerified
                         ? verifiedDisplayText
-                        : "சரிபார்க்கப்பட்டது"}
+                        : isMarkingVerified
+                          ? "சேமிக்கிறது..."
+                          : "சரிபார்க்கப்பட்டது"}
                     </Text>
                   </Pressable>
 
@@ -322,65 +512,72 @@ export default function Home() {
               </View>
             ) : (
               <View style={styles.entryCard}>
-                <Text style={styles.entryTitle}>வாக்கு சாவடி எண்</Text>
-
-                <Pressable
-                  style={({ pressed }) => [
-                    styles.selectorButton,
-                    pressed && styles.selectorButtonPressed,
-                  ]}
-                  onPress={handleOpenBoothModal}
-                  accessibilityRole="button"
+                <ScrollView
+                  style={styles.entryScroll}
+                  contentContainerStyle={styles.entryScrollContent}
+                  keyboardShouldPersistTaps="handled"
+                  showsVerticalScrollIndicator={false}
                 >
-                  <Text
-                    style={[
-                      styles.selectorText,
-                      !selectedBoothNumber && styles.selectorPlaceholder,
+                  <Text style={styles.entryTitle}>வாக்கு சாவடி எண்</Text>
+
+                  <Pressable
+                    style={({ pressed }) => [
+                      styles.selectorButton,
+                      pressed && styles.selectorButtonPressed,
+                    ]}
+                    onPress={handleOpenBoothModal}
+                    accessibilityRole="button"
+                  >
+                    <Text
+                      style={[
+                        styles.selectorText,
+                        !selectedBoothNumber && styles.selectorPlaceholder,
+                      ]}
+                    >
+                      {selectedBoothNumber || "சாவடி எண்ணை தேர்வு செய்யவும்"}
+                    </Text>
+                  </Pressable>
+
+                  <Text style={styles.entryTitle}>எண்ணை உள்ளிடவும்</Text>
+
+                  <View style={styles.inputWrap}>
+                    <TextInput
+                      value={numberValue}
+                      onChangeText={(t) => setNumberValue(t.replace(/\s/g, ""))}
+                      placeholder="எண்"
+                      placeholderTextColor="#9CA3AF"
+                      keyboardType="numeric"
+                      style={styles.input}
+                      returnKeyType="done"
+                      onSubmitEditing={handleSubmit}
+                    />
+                  </View>
+
+                  <Pressable
+                    disabled={!canSubmit}
+                    onPress={handleSubmit}
+                    accessibilityRole="button"
+                    accessibilityState={{ disabled: !canSubmit }}
+                    style={({ pressed }) => [
+                      styles.button,
+                      !canSubmit && styles.buttonDisabled,
+                      pressed && canSubmit && styles.buttonPressed,
                     ]}
                   >
-                    {selectedBoothNumber || "சாவடி எண்ணை தேர்வு செய்யவும்"}
-                  </Text>
-                </Pressable>
-
-                <Text style={styles.entryTitle}>எண்ணை உள்ளிடவும்</Text>
-
-                <View style={styles.inputWrap}>
-                  <TextInput
-                    value={numberValue}
-                    onChangeText={(t) => setNumberValue(t.replace(/\s/g, ""))}
-                    placeholder="எண்"
-                    placeholderTextColor="#9CA3AF"
-                    keyboardType="numeric"
-                    style={styles.input}
-                    returnKeyType="done"
-                    onSubmitEditing={handleSubmit}
-                  />
-                </View>
-
-                <Pressable
-                  disabled={!canSubmit}
-                  onPress={handleSubmit}
-                  accessibilityRole="button"
-                  accessibilityState={{ disabled: !canSubmit }}
-                  style={({ pressed }) => [
-                    styles.button,
-                    !canSubmit && styles.buttonDisabled,
-                    pressed && canSubmit && styles.buttonPressed,
-                  ]}
-                >
-                  <Text
-                    style={[
-                      styles.buttonText,
-                      !canSubmit && styles.buttonTextDisabled,
-                    ]}
-                  >
-                    சமர்ப்பிக்கவும்
-                  </Text>
-                </Pressable>
+                    <Text
+                      style={[
+                        styles.buttonText,
+                        !canSubmit && styles.buttonTextDisabled,
+                      ]}
+                    >
+                      சமர்ப்பிக்கவும்
+                    </Text>
+                  </Pressable>
+                </ScrollView>
               </View>
             )}
           </View>
-        </ScrollView>
+        </View>
       </KeyboardAvoidingView>
 
       <Modal
@@ -432,9 +629,7 @@ export default function Home() {
               showsVerticalScrollIndicator={false}
             >
               {isLoadingBooths ? (
-                <Text style={styles.modalLoadingText}>
-                  Loading booth numbers...
-                </Text>
+                <ActivityIndicator size="small" color="#2563EB" />
               ) : null}
               {!isLoadingBooths && filteredBoothNumbers.length === 0 ? (
                 <Text style={styles.modalEmptyText}>
@@ -468,6 +663,55 @@ export default function Home() {
           </View>
         </View>
       </Modal>
+
+      <Modal
+        visible={isNoDataModalVisible}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setIsNoDataModalVisible(false)}
+      >
+        <View style={styles.modalOverlay}>
+          <Pressable
+            style={StyleSheet.absoluteFill}
+            onPress={() => setIsNoDataModalVisible(false)}
+          />
+          <View style={styles.modalCard}>
+            <View style={styles.modalHeader}>
+              <Text style={styles.modalTitle}>தகவல் கிடைக்கவில்லை</Text>
+              <Pressable
+                style={({ pressed }) => [
+                  styles.modalCloseButton,
+                  pressed && styles.modalCloseButtonPressed,
+                ]}
+                onPress={() => setIsNoDataModalVisible(false)}
+                accessibilityRole="button"
+                accessibilityLabel="Close no data dialog"
+              >
+                <Feather name="x" size={20} color="#1E3A8A" />
+              </Pressable>
+            </View>
+
+            <View style={styles.modalList}>
+              <Text style={styles.modalEmptyText}>
+                {`இந்த ${numberValue} எண்ணிற்கு எந்த வாக்காளர் தகவலும் கிடைக்கவில்லை.`}
+              </Text>
+              <Pressable
+                onPress={() => {
+                  setIsNoDataModalVisible(false);
+                  setNumberValue("");
+                }}
+                accessibilityRole="button"
+                style={({ pressed }) => [
+                  styles.button,
+                  pressed && styles.buttonPressed,
+                ]}
+              >
+                <Text style={styles.buttonText}>சரி</Text>
+              </Pressable>
+            </View>
+          </View>
+        </View>
+      </Modal>
     </View>
   );
 }
@@ -491,8 +735,28 @@ const styles = StyleSheet.create({
     borderBottomRightRadius: 24,
     opacity: 0.9,
   },
+  logoutButton: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    paddingHorizontal: 12,
+    height: 36,
+    borderRadius: 999,
+    backgroundColor: "rgba(255,255,255,0.16)",
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.26)",
+  },
+  logoutButtonPressed: {
+    opacity: 0.9,
+  },
+  logoutButtonText: {
+    color: "#FFFFFF",
+    fontSize: 14,
+    fontWeight: "900",
+    letterSpacing: 0.2,
+  },
   content: {
-    flexGrow: 1,
+    flex: 1,
     justifyContent: "flex-start",
     paddingHorizontal: 16,
     paddingTop: 18,
@@ -506,6 +770,12 @@ const styles = StyleSheet.create({
   hero: {
     paddingHorizontal: 6,
     paddingBottom: 14,
+  },
+  heroTopRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 12,
   },
   heroTitle: {
     fontSize: 26,
@@ -536,6 +806,38 @@ const styles = StyleSheet.create({
   cardBody: {
     flex: 1,
   },
+  cardScrollContent: {
+    paddingBottom: 16,
+  },
+  cardStickyHeader: {
+    backgroundColor: "#FFFFFF",
+    paddingBottom: 10,
+  },
+  verifiedBanner: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+    borderRadius: 14,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    backgroundColor: "#ECFDF5",
+    borderWidth: 1,
+    borderColor: "#A7F3D0",
+  },
+  verifiedBannerIcon: {
+    width: 24,
+    height: 24,
+    borderRadius: 12,
+    backgroundColor: "#10B981",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  verifiedBannerText: {
+    flex: 1,
+    color: "#065F46",
+    fontSize: 14,
+    fontWeight: "900",
+  },
   entryCard: {
     marginTop: 10,
     backgroundColor: "#FFFFFF",
@@ -548,6 +850,13 @@ const styles = StyleSheet.create({
     shadowOpacity: 0.08,
     shadowRadius: 18,
     elevation: 4,
+    flex: 1,
+  },
+  entryScroll: {
+    flex: 1,
+  },
+  entryScrollContent: {
+    paddingBottom: 8,
   },
   entryTitle: {
     fontSize: 18,
@@ -598,6 +907,40 @@ const styles = StyleSheet.create({
     fontSize: 14,
     color: "#111827",
     fontWeight: "800",
+    textAlign: "right",
+  },
+  fieldList: {
+    gap: 10,
+  },
+  fieldCard: {
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: "#E5E7EB",
+    backgroundColor: "#F8FAFC",
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+  },
+  fieldLabel: {
+    fontSize: 12.5,
+    color: "#1E3A8A",
+    fontWeight: "800",
+    marginBottom: 6,
+  },
+  fieldValue: {
+    fontSize: 15,
+    color: "#111827",
+    fontWeight: "800",
+    textAlign: "left",
+  },
+  valueColumn: {
+    flex: 1,
+    alignItems: "flex-end",
+    gap: 4,
+  },
+  tamilTransliteration: {
+    fontSize: 15,
+    fontWeight: "700",
+    color: "#1D4ED8",
     textAlign: "right",
   },
   prominentValue: {
@@ -805,6 +1148,7 @@ const styles = StyleSheet.create({
     color: "#6B7280",
     fontWeight: "600",
     marginBottom: 12,
+    textAlign: "center",
   },
   modalOption: {
     minHeight: 48,

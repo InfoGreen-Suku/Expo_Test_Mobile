@@ -11,11 +11,34 @@ async function ensureVotersSchema(db: SQLite.SQLiteDatabase) {
     `PRAGMA table_info(voters_list)`,
   );
   const hasStatusColumn = columns.some((column) => column.name === "status");
+  const hasVerifiedByName = columns.some(
+    (column) => column.name === "verified_by_name",
+  );
+  const hasVerifiedByDeviceId = columns.some(
+    (column) => column.name === "verified_by_device_id",
+  );
+  const hasVerifiedAt = columns.some((column) => column.name === "verified_at");
 
   if (!hasStatusColumn) {
     await db.execAsync(
       `ALTER TABLE voters_list ADD COLUMN status INTEGER NOT NULL DEFAULT 0`,
     );
+  }
+
+  if (!hasVerifiedByName) {
+    await db.execAsync(
+      `ALTER TABLE voters_list ADD COLUMN verified_by_name TEXT`,
+    );
+  }
+
+  if (!hasVerifiedByDeviceId) {
+    await db.execAsync(
+      `ALTER TABLE voters_list ADD COLUMN verified_by_device_id TEXT`,
+    );
+  }
+
+  if (!hasVerifiedAt) {
+    await db.execAsync(`ALTER TABLE voters_list ADD COLUMN verified_at TEXT`);
   }
 }
 
@@ -110,13 +133,30 @@ export async function getDistinctBhagNos() {
   });
 }
 
-export async function markVoterVerified(sr: number, bhagNo: string) {
+export async function markVoterVerified(
+  sr: number,
+  bhagNo: string,
+  meta?: {
+    userName?: string | null;
+    deviceId?: string | null;
+    verifiedAt?: string | null;
+  },
+) {
   const db = await getDb();
   await db.runAsync(
     `UPDATE voters_list
-     SET status = 1
+     SET status = 1,
+         verified_by_name = ?,
+         verified_by_device_id = ?,
+         verified_at = ?
      WHERE sr = ?
        AND CAST(bhag_no AS TEXT) = ?`,
-    [sr, bhagNo.trim()],
+    [
+      meta?.userName ?? null,
+      meta?.deviceId ?? null,
+      meta?.verifiedAt ?? null,
+      sr,
+      bhagNo.trim(),
+    ],
   );
 }
