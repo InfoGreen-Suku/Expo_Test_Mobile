@@ -1,4 +1,5 @@
 import { AuthProvider, useAuth } from "@/auth/AuthContext";
+import { requestAndroidPostNotificationsPermission } from "@/utils/androidPostNotificationsPermission";
 import store from "@/redux/store";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import {
@@ -8,7 +9,6 @@ import {
   NavigationContainer,
   ThemeProvider,
 } from "@react-navigation/native";
-import { ShareIntentProvider } from "expo-share-intent";
 import { StatusBar } from "expo-status-bar";
 import { useEffect, useRef } from "react";
 import { Text, TextInput, useColorScheme, View } from "react-native";
@@ -46,13 +46,11 @@ export default function RootLayout() {
   // }, []);
   return (
     <Provider store={store}>
-      <ShareIntentProvider>
-        <SafeAreaProvider>
-          <AuthProvider>
-            <Root />
-          </AuthProvider>
-        </SafeAreaProvider>
-      </ShareIntentProvider>
+      <SafeAreaProvider>
+        <AuthProvider>
+          <Root />
+        </AuthProvider>
+      </SafeAreaProvider>
     </Provider>
   );
 }
@@ -88,6 +86,14 @@ function Root() {
         console.log("Navigation data is missing or incomplete.");
       }
     });
+  }, []);
+
+  /** Android 13+: notification permission at app open (Login or Home), not from Home/sync. */
+  useEffect(() => {
+    const id = setTimeout(() => {
+      void requestAndroidPostNotificationsPermission();
+    }, 500);
+    return () => clearTimeout(id);
   }, []);
   const navigateToScreen = (
     screenName: any,

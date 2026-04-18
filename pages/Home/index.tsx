@@ -1,19 +1,35 @@
 import { useAuth } from "@/auth/AuthContext";
 import {
+  startReminderService,
+  stopReminder,
+  syncVerifiedVotersStatusToApi,
+} from "@/hooks/backgroundTask";
+import {
+  applyServerVerifiedListPatch,
+  formatVerifiedAtStorageLocal,
+  getBoothVerifiedCountForDevice,
+  getBoothVerifiedVotersListForDevice,
+  getBoothVoterVerificationCounts,
   getDistinctBhagNos,
   getVoterBySr,
   markVoterVerified,
+  warmUpVotersDb,
 } from "@/sqlite/votersDb";
 import { transliterateLatinToTamil } from "@/utils/transliterateToTamil";
 import Feather from "@expo/vector-icons/Feather";
 import AsyncStorage from "@react-native-async-storage/async-storage";
-import React, { useEffect, useMemo, useState } from "react";
+import axios from "axios";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 import {
   ActivityIndicator,
+  AppState,
+  type AppStateStatus,
+  FlatList,
   KeyboardAvoidingView,
   Modal,
   Platform,
   Pressable,
+  RefreshControl,
   ScrollView,
   StyleSheet,
   Text,
@@ -21,9 +37,187 @@ import {
   View,
 } from "react-native";
 
+const REFRESH_SPINNER_COLOR = "#2563EB";
+
 const SELECTED_BOOTH_STORAGE_KEY = "selectedBoothNumber";
 const BOOTH_NUMBERS_STORAGE_KEY = "boothNumbersList";
 const AUTH_USER_STORAGE_KEY = "authUser";
+
+function normalizeBoothNo(value: unknown): string {
+  if (value == null) return "";
+  return String(value).trim();
+}
+const DAILY_ACCESS_MAX_TIME_STORAGE_KEY = "dailyAccessMaxTimeHm";
+
+/** Fallback if API / AsyncStorage have not provided a time yet. */
+const DEFAULT_DAILY_ACCESS_END_HOUR = 16;
+const DEFAULT_DAILY_ACCESS_END_MINUTE = 45;
+
+type AccessEndHm = { hour: number; minute: number };
+
+/** Daily wall-clock cutoff, or a single calendar end instant from API datetime. */
+type AccessEndSpec =
+  | { kind: "daily"; hour: number; minute: number }
+  | { kind: "absolute"; endMs: number };
+
+function getDefaultAccessEndSpec(): AccessEndSpec {
+  return {
+    kind: "daily",
+    hour: DEFAULT_DAILY_ACCESS_END_HOUR,
+    minute: DEFAULT_DAILY_ACCESS_END_MINUTE,
+  };
+}
+
+function isPastDailyAccessCutoff(date: Date, end: AccessEndHm): boolean {
+  const cutoff = new Date(date);
+  cutoff.setHours(end.hour, end.minute, 0, 0);
+  return date.getTime() >= cutoff.getTime();
+}
+
+function isPastAccessEndSpec(now: Date, spec: AccessEndSpec): boolean {
+  if (spec.kind === "absolute") {
+    return now.getTime() >= spec.endMs;
+  }
+  return isPastDailyAccessCutoff(now, {
+    hour: spec.hour,
+    minute: spec.minute,
+  });
+}
+
+/** Parses `2026-04-18 19:10:00` or `2026-04-18T19:10:00` as local wall time. */
+function parseApiDateTimeLocal(raw: string): Date | null {
+  const m = raw
+    .trim()
+    .match(/^(\d{4})-(\d{2})-(\d{2})[ T](\d{1,2}):(\d{2})(?::(\d{2}))?$/);
+  if (!m) return null;
+  const y = Number(m[1]);
+  const mo = Number(m[2]);
+  const da = Number(m[3]);
+  const h = Number(m[4]);
+  const mi = Number(m[5]);
+  const se = m[6] !== undefined ? Number(m[6]) : 0;
+  if ([y, mo, da, h, mi, se].some((n) => !Number.isFinite(n))) return null;
+  const d = new Date(y, mo - 1, da, h, mi, se);
+  if (Number.isNaN(d.getTime())) return null;
+  return d;
+}
+
+function formatDailyCutoffDisplayLabel(hm: AccessEndHm): string {
+  const d = new Date(2000, 0, 1, hm.hour, hm.minute);
+  let h = d.getHours();
+  const m = String(d.getMinutes()).padStart(2, "0");
+  const ampm = h >= 12 ? "PM" : "AM";
+  h = h % 12;
+  if (h === 0) h = 12;
+  return `${h}:${m} ${ampm}`;
+}
+
+function parseMaxTimeToHm(value: unknown): AccessEndHm | null {
+  if (value == null || value === "") return null;
+  if (typeof value === "object" && value !== null) {
+    const o = value as Record<string, unknown>;
+    if (typeof o.hour === "number" && typeof o.minute === "number") {
+      const hour = o.hour;
+      const minute = o.minute;
+      if (hour >= 0 && hour <= 23 && minute >= 0 && minute <= 59) {
+        return { hour, minute };
+      }
+    }
+    return null;
+  }
+
+  let s = String(value).trim().replace(/\s+/g, " ");
+  if (!s) return null;
+
+  let m = s.match(/^(\d{1,2}):(\d{2})(?::\d{2})?$/);
+  if (m) {
+    const hour = Number(m[1]);
+    const minute = Number(m[2]);
+    if (hour >= 0 && hour <= 23 && minute >= 0 && minute <= 59) {
+      return { hour, minute };
+    }
+    return null;
+  }
+
+  // e.g. "5:15 PM", "05:15:00PM", "05:15:00 PM" (optional seconds, space before AM/PM optional)
+  m = s.match(/^(\d{1,2})[.:](\d{2})(?:[.:](\d{2}))?\s*(AM|PM)\s*$/i);
+  if (m) {
+    let hour = Number(m[1]);
+    const minute = Number(m[2]);
+    const ap = m[4].toUpperCase();
+    if (minute < 0 || minute > 59) return null;
+    if (ap === "AM") {
+      if (hour === 12) hour = 0;
+      else if (hour < 1 || hour > 12) return null;
+    } else {
+      if (hour === 12) hour = 12;
+      else if (hour < 1 || hour > 11) return null;
+      else hour += 12;
+    }
+    return { hour, minute };
+  }
+
+  m = s.match(/^(\d{1,2})\.(\d{2})$/);
+  if (m) {
+    const hour = Number(m[1]);
+    const minute = Number(m[2]);
+    if (hour >= 0 && hour <= 23 && minute >= 0 && minute <= 59) {
+      return { hour, minute };
+    }
+  }
+
+  return null;
+}
+
+function parseAccessEndSpec(value: unknown): AccessEndSpec | null {
+  if (value == null || value === "") return null;
+
+  if (typeof value === "string") {
+    const dt = parseApiDateTimeLocal(value);
+    if (dt) return { kind: "absolute", endMs: dt.getTime() };
+  }
+
+  const hm = parseMaxTimeToHm(value);
+  if (hm) return { kind: "daily", hour: hm.hour, minute: hm.minute };
+  return null;
+}
+
+const EXPIRY_FIELD_KEYS = ["maxTime", "expiry_datetime"] as const;
+
+function pickExpiryFromRecord(
+  row: Record<string, unknown> | null | undefined,
+): unknown {
+  if (!row) return null;
+  for (const key of EXPIRY_FIELD_KEYS) {
+    const v = row[key];
+    if (v != null && String(v).trim() !== "") return v;
+  }
+  return null;
+}
+
+function extractMaxTimeFromUserPayload(
+  data: unknown,
+  matchedUser: Record<string, unknown> | null,
+): unknown {
+  const fromMatched = pickExpiryFromRecord(matchedUser ?? undefined);
+  if (fromMatched != null) return fromMatched;
+
+  if (Array.isArray(data)) {
+    for (const row of data) {
+      if (row && typeof row === "object") {
+        const v = pickExpiryFromRecord(row as Record<string, unknown>);
+        if (v != null) return v;
+      }
+    }
+  }
+
+  if (data && typeof data === "object" && !Array.isArray(data)) {
+    const v = pickExpiryFromRecord(data as Record<string, unknown>);
+    if (v != null) return v;
+  }
+
+  return null;
+}
 
 function formatBilingualName(tamil: unknown, english: unknown): string {
   const clean = (value: unknown) =>
@@ -58,6 +252,13 @@ function formatDateTime12h(date: Date): string {
   return `${dd}-${mm}-${yyyy} ${hh}:${minutes} ${ampm}`;
 }
 
+function formatAccessLimitMessage(spec: AccessEndSpec): string {
+  if (spec.kind === "absolute") {
+    return `Access is available until ${formatDateTime12h(new Date(spec.endMs))}.`;
+  }
+  return `Daily access is available until ${formatDailyCutoffDisplayLabel({ hour: spec.hour, minute: spec.minute })}.`;
+}
+
 function maskVoterId(value: unknown) {
   const raw = value == null ? "" : String(value).trim();
   if (!raw) return "X";
@@ -80,7 +281,7 @@ export default function Home() {
   const [matchedVoter, setMatchedVoter] = useState<any | null>(null);
   const [boothNumbers, setBoothNumbers] = useState<string[]>([]);
   const [selectedBoothNumber, setSelectedBoothNumber] = useState("");
-  const [isBoothModalVisible, setIsBoothModalVisible] = useState(false);
+  // const [isBoothModalVisible, setIsBoothModalVisible] = useState(false);
   const [isNoDataModalVisible, setIsNoDataModalVisible] = useState(false);
   const [isLoadingBooths, setIsLoadingBooths] = useState(false);
   const [boothSearchValue, setBoothSearchValue] = useState("");
@@ -88,10 +289,36 @@ export default function Home() {
   const [relationNameTamilScript, setRelationNameTamilScript] = useState<
     string | null
   >(null);
+  const [isLookupPending, setIsLookupPending] = useState(false);
+  const [refreshingBoothApi, setRefreshingBoothApi] = useState(false);
+  const [userAccessStatus, setUserAccessStatus] = useState<boolean>(false);
+  const [userAccessResolved, setUserAccessResolved] = useState(false);
+  const [accessTimeTick, setAccessTimeTick] = useState(0);
+  const [accessEndSpec, setAccessEndSpec] = useState<AccessEndSpec | null>(
+    null,
+  );
+  const [boothVoterCounts, setBoothVoterCounts] = useState<{
+    booth: string;
+    verified: number;
+    total: number;
+    verifiedOnDevice: number;
+  } | null>(null);
+  const [boothVoterCountsLoading, setBoothVoterCountsLoading] = useState(false);
+  const [boothCountsRefreshKey, setBoothCountsRefreshKey] = useState(0);
+  const [verifiedListModalVisible, setVerifiedListModalVisible] =
+    useState(false);
+  const [verifiedListRows, setVerifiedListRows] = useState<
+    { sr: number; verified_at: string | null }[]
+  >([]);
+  const [verifiedListLoading, setVerifiedListLoading] = useState(false);
+  const [verifiedListDeviceId, setVerifiedListDeviceId] = useState("");
+  const [voterListRefreshModalVisible, setVoterListRefreshModalVisible] =
+    useState(false);
 
   const canSubmit = useMemo(
     () =>
-      numberValue.trim().length > 0 && selectedBoothNumber.trim().length > 0,
+      numberValue.trim().length > 0 &&
+      normalizeBoothNo(selectedBoothNumber).length > 0,
     [numberValue, selectedBoothNumber],
   );
 
@@ -102,6 +329,7 @@ export default function Home() {
   const verifiedDisplayText = justVerified
     ? "வெற்றிகரமாக சரிபார்க்கப்பட்டது"
     : "ஏற்கனவே சரிபார்க்கப்பட்டது";
+
   const filteredBoothNumbers = useMemo(() => {
     const searchValue = boothSearchValue.trim();
     if (!searchValue) return boothNumbers;
@@ -109,15 +337,285 @@ export default function Home() {
     return boothNumbers.filter((item) => item.includes(searchValue));
   }, [boothNumbers, boothSearchValue]);
 
+  const isPastAccessCutoff = useMemo(() => {
+    void accessTimeTick;
+    const spec = accessEndSpec ?? getDefaultAccessEndSpec();
+    return isPastAccessEndSpec(new Date(), spec);
+  }, [accessTimeTick, accessEndSpec]);
+
+  const hasValidAccess = userAccessStatus && !isPastAccessCutoff;
+
+  useEffect(() => {
+    const id = setInterval(() => setAccessTimeTick((n) => n + 1), 30_000);
+    return () => clearInterval(id);
+  }, []);
+
+  /**
+   * Background voter sync: runs once user/session is resolved and we have a booth.
+   * Not gated on `hasValidAccess` — pending SQLite rows should still upload when the
+   * UI shows invalid access or past cutoff (e.g. time window ended).
+   */
+  useEffect(() => {
+    let cancelled = false;
+
+    const run = async () => {
+      if (!userAccessResolved || cancelled) {
+        if (__DEV__ && !cancelled) {
+          console.log(
+            "[BackgroundSync/Home] waiting — userAccessResolved is false",
+          );
+        }
+        return;
+      }
+
+      const boothFromStorage = normalizeBoothNo(
+        await AsyncStorage.getItem(SELECTED_BOOTH_STORAGE_KEY),
+      );
+      const boothFromState = normalizeBoothNo(selectedBoothNumber);
+      const booth = boothFromState || boothFromStorage;
+
+      if (!booth) {
+        if (__DEV__) {
+          console.log(
+            "[BackgroundSync/Home] not starting — no booth in AsyncStorage/state",
+          );
+        }
+        await stopReminder();
+        return;
+      }
+
+      await new Promise((r) => setTimeout(r, 400));
+      if (cancelled) return;
+
+      if (__DEV__) {
+        console.log(
+          "[BackgroundSync/Home] calling startReminderService, booth=",
+          booth,
+        );
+      }
+      await startReminderService();
+    };
+
+    void run();
+    return () => {
+      cancelled = true;
+    };
+  }, [userAccessResolved, selectedBoothNumber]);
+
+  useEffect(() => {
+    if (!userAccessResolved || !hasValidAccess) {
+      setBoothVoterCounts(null);
+      setBoothVoterCountsLoading(false);
+      return;
+    }
+
+    let cancelled = false;
+
+    void (async () => {
+      setBoothVoterCountsLoading(true);
+      try {
+        const fromStorage = normalizeBoothNo(
+          await AsyncStorage.getItem(SELECTED_BOOTH_STORAGE_KEY),
+        );
+        const booth = normalizeBoothNo(selectedBoothNumber) || fromStorage;
+        if (!booth) {
+          if (!cancelled) {
+            setBoothVoterCounts(null);
+          }
+          return;
+        }
+
+        const authRaw = await AsyncStorage.getItem(AUTH_USER_STORAGE_KEY);
+        const auth = authRaw ? (JSON.parse(authRaw) as any) : null;
+        const deviceId =
+          auth && typeof auth.deviceId === "string" ? auth.deviceId.trim() : "";
+
+        const [{ verifiedCount, totalCount }, verifiedOnDevice] =
+          await Promise.all([
+            getBoothVoterVerificationCounts(booth),
+            deviceId
+              ? getBoothVerifiedCountForDevice(booth, deviceId)
+              : Promise.resolve(0),
+          ]);
+        if (!cancelled) {
+          setBoothVoterCounts({
+            booth,
+            verified: verifiedCount,
+            total: totalCount,
+            verifiedOnDevice,
+          });
+        }
+      } catch (err) {
+        console.log("Failed to load booth voter counts:", err);
+        if (!cancelled) {
+          setBoothVoterCounts(null);
+        }
+      } finally {
+        if (!cancelled) {
+          setBoothVoterCountsLoading(false);
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    userAccessResolved,
+    hasValidAccess,
+    selectedBoothNumber,
+    boothCountsRefreshKey,
+  ]);
+
+  const openVerifiedListModal = useCallback(async () => {
+    const booth = normalizeBoothNo(selectedBoothNumber);
+    if (!booth) return;
+
+    setVerifiedListModalVisible(true);
+    setVerifiedListLoading(true);
+    try {
+      const authRaw = await AsyncStorage.getItem(AUTH_USER_STORAGE_KEY);
+      const auth = authRaw ? (JSON.parse(authRaw) as any) : null;
+      const deviceId =
+        auth && typeof auth.deviceId === "string" ? auth.deviceId.trim() : "";
+      setVerifiedListDeviceId(deviceId);
+      if (!deviceId) {
+        setVerifiedListRows([]);
+        return;
+      }
+      const rows = await getBoothVerifiedVotersListForDevice(booth, deviceId);
+      setVerifiedListRows(rows);
+    } catch (e) {
+      console.log("Failed to load verified voters list:", e);
+      setVerifiedListRows([]);
+    } finally {
+      setVerifiedListLoading(false);
+    }
+  }, [selectedBoothNumber]);
+
+  const closeVerifiedListModal = useCallback(() => {
+    setVerifiedListModalVisible(false);
+    setVerifiedListRows([]);
+    setVerifiedListDeviceId("");
+  }, []);
+
+  const closeVoterListRefreshModal = useCallback(() => {
+    setVoterListRefreshModalVisible(false);
+  }, []);
+
+  useEffect(() => {
+    const onAppState = (state: AppStateStatus) => {
+      if (state === "active") setAccessTimeTick((n) => n + 1);
+    };
+    const sub = AppState.addEventListener("change", onAppState);
+    return () => sub.remove();
+  }, []);
+
+  const getBoothNumbers = useCallback(async () => {
+    const authRaw = await AsyncStorage.getItem(AUTH_USER_STORAGE_KEY);
+    const auth = authRaw ? (JSON.parse(authRaw) as any) : null;
+    const deviceID =
+      auth && typeof auth.deviceId === "string" ? auth.deviceId : undefined;
+    try {
+      const response = await axios.post(
+        `https://voters.infogreen.co/api/user_status.php`,
+        {
+          deviceID: deviceID,
+        },
+      );
+      const data = response.data;
+
+      console.log("response", data);
+      if (data) {
+        const booth = normalizeBoothNo(data.booth_no);
+        await AsyncStorage.setItem(SELECTED_BOOTH_STORAGE_KEY, booth);
+        setSelectedBoothNumber(booth);
+        setUserAccessStatus(data.status === 1);
+        const maxTimeRaw = extractMaxTimeFromUserPayload(data, null);
+        const parsedMax = parseAccessEndSpec(maxTimeRaw);
+        if (parsedMax) {
+          await AsyncStorage.setItem(
+            DAILY_ACCESS_MAX_TIME_STORAGE_KEY,
+            JSON.stringify(parsedMax),
+          );
+          setAccessEndSpec(parsedMax);
+        }
+      } else {
+        setUserAccessStatus(false);
+      }
+    } catch (error) {
+      setUserAccessStatus(false);
+      console.log("Failed to get user by id:", error);
+    } finally {
+      setUserAccessResolved(true);
+    }
+  }, []);
+
+  const onRefreshBoothApi = useCallback(async () => {
+    setRefreshingBoothApi(true);
+    try {
+      await getBoothNumbers();
+    } finally {
+      setRefreshingBoothApi(false);
+    }
+  }, [getBoothNumbers]);
+
+  const refresh = async () => {
+    const boothNo = await AsyncStorage.getItem(SELECTED_BOOTH_STORAGE_KEY);
+    if (!boothNo) return;
+    try {
+      try {
+        await syncVerifiedVotersStatusToApi();
+        setBoothCountsRefreshKey((k) => k + 1);
+      } catch (syncErr) {
+        console.log("Pending voter status sync (refresh):", syncErr);
+      }
+
+      const response = await axios.post(
+        `https://voters.infogreen.co/api/updated_voter_list.php`,
+        {
+          bhag_no: boothNo,
+        },
+      );
+      if (response.data?.status === "success") {
+        setVoterListRefreshModalVisible(true);
+        try {
+          const apiBhag = normalizeBoothNo(response.data.bhag_no ?? boothNo);
+          const srList = response.data.sr_list;
+          const list = Array.isArray(srList) ? srList : [];
+          await applyServerVerifiedListPatch(apiBhag, list);
+          setBoothCountsRefreshKey((k) => k + 1);
+        } catch (patchErr) {
+          console.log("Failed to apply server voter list patch:", patchErr);
+        } finally {
+          setVoterListRefreshModalVisible(false);
+        }
+      }
+    } catch (error) {
+      console.log("Failed to refresh booth number:", error);
+    }
+  };
+  const boothListRefreshControl = (
+    <RefreshControl
+      refreshing={refreshingBoothApi}
+      onRefresh={onRefreshBoothApi}
+      tintColor={REFRESH_SPINNER_COLOR}
+      colors={[REFRESH_SPINNER_COLOR]}
+      progressBackgroundColor="#FFFFFF"
+    />
+  );
+
   useEffect(() => {
     const loadSavedBoothState = async () => {
       try {
-        const [storedBoothNumber, storedBoothNumbers] = await Promise.all([
-          AsyncStorage.getItem(SELECTED_BOOTH_STORAGE_KEY),
-          AsyncStorage.getItem(BOOTH_NUMBERS_STORAGE_KEY),
-        ]);
+        const [storedBoothNumber, storedBoothNumbers, storedAccessHmRaw] =
+          await Promise.all([
+            AsyncStorage.getItem(SELECTED_BOOTH_STORAGE_KEY),
+            AsyncStorage.getItem(BOOTH_NUMBERS_STORAGE_KEY),
+            AsyncStorage.getItem(DAILY_ACCESS_MAX_TIME_STORAGE_KEY),
+          ]);
         if (storedBoothNumber) {
-          setSelectedBoothNumber(storedBoothNumber);
+          setSelectedBoothNumber(normalizeBoothNo(storedBoothNumber));
         }
 
         if (storedBoothNumbers) {
@@ -126,13 +624,55 @@ export default function Home() {
             setBoothNumbers(parsedBoothNumbers);
           }
         }
+
+        if (storedAccessHmRaw) {
+          try {
+            const p = JSON.parse(storedAccessHmRaw) as Record<string, unknown>;
+            if (p.kind === "absolute" && typeof p.endMs === "number") {
+              setAccessEndSpec({ kind: "absolute", endMs: p.endMs });
+            } else if (
+              p.kind === "daily" &&
+              typeof p.hour === "number" &&
+              typeof p.minute === "number" &&
+              p.hour >= 0 &&
+              p.hour <= 23 &&
+              p.minute >= 0 &&
+              p.minute <= 59
+            ) {
+              setAccessEndSpec({
+                kind: "daily",
+                hour: p.hour,
+                minute: p.minute,
+              });
+            } else if (
+              typeof p.hour === "number" &&
+              typeof p.minute === "number" &&
+              p.hour >= 0 &&
+              p.hour <= 23 &&
+              p.minute >= 0 &&
+              p.minute <= 59
+            ) {
+              setAccessEndSpec({
+                kind: "daily",
+                hour: p.hour,
+                minute: p.minute,
+              });
+            }
+          } catch {
+            /* ignore invalid stored shape */
+          }
+        }
       } catch (error) {
         console.log("Failed to load saved booth number:", error);
       }
     };
 
     void loadSavedBoothState();
-  }, []);
+    void getBoothNumbers();
+    void warmUpVotersDb().catch((err) => {
+      console.log("Failed to warm up voters DB:", err);
+    });
+  }, [getBoothNumbers]);
 
   useEffect(() => {
     if (!matchedVoter) {
@@ -207,25 +747,25 @@ export default function Home() {
     }
   };
 
-  const handleOpenBoothModal = () => {
-    setIsBoothModalVisible(true);
-    void loadBoothNumbers();
-  };
+  // const handleOpenBoothModal = () => {
+  //   setIsBoothModalVisible(true);
+  //   void loadBoothNumbers();
+  // };
 
-  const handleCloseBoothModal = () => {
-    setIsBoothModalVisible(false);
-    setBoothSearchValue("");
-  };
+  // const handleCloseBoothModal = () => {
+  //   setIsBoothModalVisible(false);
+  //   setBoothSearchValue("");
+  // };
 
-  const handleBoothSelect = async (boothNumber: string) => {
-    try {
-      await AsyncStorage.setItem(SELECTED_BOOTH_STORAGE_KEY, boothNumber);
-      setSelectedBoothNumber(boothNumber);
-      handleCloseBoothModal();
-    } catch (error) {
-      console.log("Failed to save booth number:", error);
-    }
-  };
+  // const handleBoothSelect = async (boothNumber: string) => {
+  //   try {
+  //     await AsyncStorage.setItem(SELECTED_BOOTH_STORAGE_KEY, boothNumber);
+  //     setSelectedBoothNumber(boothNumber);
+  //     handleCloseBoothModal();
+  //   } catch (error) {
+  //     console.log("Failed to save booth number:", error);
+  //   }
+  // };
 
   const handleSubmit = async () => {
     const value = numberValue.trim();
@@ -233,6 +773,7 @@ export default function Home() {
     const sr = Number.parseInt(value, 10);
     if (Number.isNaN(sr)) return;
 
+    setIsLookupPending(true);
     try {
       setIsNoDataModalVisible(false);
       const row = await getVoterBySr(sr, selectedBoothNumber);
@@ -257,6 +798,8 @@ export default function Home() {
       setMarkedVerified(false);
       setJustVerified(false);
       setVerified(false);
+    } finally {
+      setIsLookupPending(false);
     }
   };
 
@@ -273,7 +816,7 @@ export default function Home() {
         auth && typeof auth.name === "string" ? auth.name : undefined;
       const deviceId =
         auth && typeof auth.deviceId === "string" ? auth.deviceId : undefined;
-      const verifiedAt = formatDateTime12h(new Date());
+      const verifiedAt = formatVerifiedAtStorageLocal(new Date());
 
       // Optimistic UI update (so it reflects immediately)
       setIsMarkingVerified(true);
@@ -296,6 +839,8 @@ export default function Home() {
         deviceId,
         verifiedAt,
       });
+
+      setBoothCountsRefreshKey((k) => k + 1);
     } catch (error) {
       console.log("Failed to update voter verification status:", error);
       // Roll back optimistic state if the DB update failed
@@ -314,7 +859,7 @@ export default function Home() {
     }
   };
 
-  const handleReset = () => {
+  const handleReset = useCallback(() => {
     setNumberValue("");
     setVerified(false);
     setMarkedVerified(false);
@@ -323,15 +868,12 @@ export default function Home() {
     setNameTamilScript(null);
     setRelationNameTamilScript(null);
     setIsNoDataModalVisible(false);
-  };
+  }, []);
 
-  const handleLogout = async () => {
-    try {
-      await AsyncStorage.multiRemove([SELECTED_BOOTH_STORAGE_KEY, "authUser"]);
-    } finally {
-      await signOutLocal();
-    }
-  };
+  useEffect(() => {
+    if (!userAccessResolved || !isPastAccessCutoff || !verified) return;
+    handleReset();
+  }, [userAccessResolved, isPastAccessCutoff, verified, handleReset]);
 
   return (
     <View style={styles.screen}>
@@ -350,22 +892,22 @@ export default function Home() {
                     styles.logoutButton,
                     pressed && styles.logoutButtonPressed,
                   ]}
-                  onPress={() => void handleLogout()}
+                  onPress={() => refresh()}
                   accessibilityRole="button"
                 >
-                  <Feather name="log-out" size={18} color="#FFFFFF" />
-                  <Text style={styles.logoutButtonText}>Logout</Text>
+                  <Feather name="refresh-ccw" size={18} color="#FFFFFF" />
+                  <Text style={styles.logoutButtonText}>Refresh</Text>
                 </Pressable>
               </View>
 
               <Text style={styles.heroSubtitle}>
-                {verified
+                {verified && hasValidAccess
                   ? "உங்கள் விவரங்களை சரிபார்க்க கீழே உள்ள தகவல்கள் சரியாக உள்ளதா என்பதை உறுதிப்படுத்தவும்."
                   : "சரிபார்க்க வேண்டிய எண்ணை உள்ளிட்டு சமர்ப்பிக்கவும்."}
               </Text>
             </View>
 
-            {verified ? (
+            {verified && hasValidAccess ? (
               <View style={styles.card}>
                 <ScrollView
                   style={styles.cardBody}
@@ -512,75 +1054,217 @@ export default function Home() {
               </View>
             ) : (
               <View style={styles.entryCard}>
-                <ScrollView
-                  style={styles.entryScroll}
-                  contentContainerStyle={styles.entryScrollContent}
-                  keyboardShouldPersistTaps="handled"
-                  showsVerticalScrollIndicator={false}
-                >
-                  <Text style={styles.entryTitle}>வாக்கு சாவடி எண்</Text>
-
-                  <Pressable
-                    style={({ pressed }) => [
-                      styles.selectorButton,
-                      pressed && styles.selectorButtonPressed,
-                    ]}
-                    onPress={handleOpenBoothModal}
-                    accessibilityRole="button"
-                  >
-                    <Text
-                      style={[
-                        styles.selectorText,
-                        !selectedBoothNumber && styles.selectorPlaceholder,
-                      ]}
-                    >
-                      {selectedBoothNumber || "சாவடி எண்ணை தேர்வு செய்யவும்"}
-                    </Text>
-                  </Pressable>
-
-                  <Text style={styles.entryTitle}>எண்ணை உள்ளிடவும்</Text>
-
-                  <View style={styles.inputWrap}>
-                    <TextInput
-                      value={numberValue}
-                      onChangeText={(t) => setNumberValue(t.replace(/\s/g, ""))}
-                      placeholder="எண்"
-                      placeholderTextColor="#9CA3AF"
-                      keyboardType="numeric"
-                      style={styles.input}
-                      returnKeyType="done"
-                      onSubmitEditing={handleSubmit}
+                {!userAccessResolved ? (
+                  <View style={styles.accessCheckContainer}>
+                    <ActivityIndicator
+                      size="large"
+                      color={REFRESH_SPINNER_COLOR}
                     />
+                    <Text style={styles.accessCheckText}>Checking access…</Text>
                   </View>
-
-                  <Pressable
-                    disabled={!canSubmit}
-                    onPress={handleSubmit}
-                    accessibilityRole="button"
-                    accessibilityState={{ disabled: !canSubmit }}
-                    style={({ pressed }) => [
-                      styles.button,
-                      !canSubmit && styles.buttonDisabled,
-                      pressed && canSubmit && styles.buttonPressed,
-                    ]}
+                ) : !hasValidAccess ? (
+                  <ScrollView
+                    style={styles.entryScroll}
+                    contentContainerStyle={styles.invalidAccessScrollContent}
+                    keyboardShouldPersistTaps="handled"
+                    showsVerticalScrollIndicator={false}
+                    refreshControl={boothListRefreshControl}
                   >
-                    <Text
-                      style={[
-                        styles.buttonText,
-                        !canSubmit && styles.buttonTextDisabled,
+                    <View style={styles.invalidAccessBlock}>
+                      <View style={styles.invalidAccessIconWrap}>
+                        <Feather
+                          name="alert-circle"
+                          size={44}
+                          color="#DC2626"
+                        />
+                      </View>
+                      <Text style={styles.invalidAccessTitle}>
+                        Invalid access
+                      </Text>
+                      {isPastAccessCutoff && userAccessStatus ? (
+                        <Text style={styles.invalidAccessSubtitle}>
+                          {formatAccessLimitMessage(
+                            accessEndSpec ?? getDefaultAccessEndSpec(),
+                          )}
+                        </Text>
+                      ) : null}
+
+                      <Pressable
+                        onPress={() => void onRefreshBoothApi()}
+                        disabled={refreshingBoothApi}
+                        accessibilityRole="button"
+                        accessibilityState={{ disabled: refreshingBoothApi }}
+                        style={({ pressed }) => [
+                          styles.button,
+                          styles.invalidAccessRefreshButton,
+                          refreshingBoothApi && styles.buttonDisabled,
+                          pressed &&
+                            !refreshingBoothApi &&
+                            styles.buttonPressed,
+                        ]}
+                      >
+                        {refreshingBoothApi ? (
+                          <View style={styles.submitButtonInner}>
+                            <ActivityIndicator color="#FFFFFF" size="small" />
+                            <Text style={styles.buttonText}>Refreshing…</Text>
+                          </View>
+                        ) : (
+                          <Text style={styles.buttonText}>Refresh</Text>
+                        )}
+                      </Pressable>
+                    </View>
+                  </ScrollView>
+                ) : (
+                  <ScrollView
+                    style={styles.entryScroll}
+                    contentContainerStyle={styles.entryScrollContent}
+                    keyboardShouldPersistTaps="handled"
+                    showsVerticalScrollIndicator={false}
+                    refreshControl={boothListRefreshControl}
+                  >
+                    <Text style={styles.entryTitle}>வாக்கு சாவடி எண்</Text>
+
+                    <Pressable
+                      style={({ pressed }) => [
+                        styles.selectorButton,
+                        pressed && styles.selectorButtonPressed,
+                      ]}
+                      // onPress={handleOpenBoothModal}
+                      accessibilityRole="button"
+                    >
+                      <Text
+                        style={[
+                          styles.selectorText,
+                          !selectedBoothNumber && styles.selectorPlaceholder,
+                        ]}
+                      >
+                        {selectedBoothNumber || "சாவடி எண்ணை தேர்வு செய்யவும்"}
+                      </Text>
+                    </Pressable>
+
+                    <Text style={styles.entryTitle}>எண்ணை உள்ளிடவும்</Text>
+
+                    <View style={styles.inputWrap}>
+                      <TextInput
+                        value={numberValue}
+                        onChangeText={(t) =>
+                          setNumberValue(t.replace(/\s/g, ""))
+                        }
+                        placeholder="எண்"
+                        placeholderTextColor="#9CA3AF"
+                        keyboardType="numeric"
+                        style={styles.input}
+                        returnKeyType="done"
+                        onSubmitEditing={() => void handleSubmit()}
+                      />
+                    </View>
+
+                    <Pressable
+                      disabled={!canSubmit || isLookupPending}
+                      onPress={() => void handleSubmit()}
+                      accessibilityRole="button"
+                      accessibilityState={{
+                        disabled: !canSubmit || isLookupPending,
+                      }}
+                      style={({ pressed }) => [
+                        styles.button,
+                        !canSubmit && styles.buttonDisabled,
+                        pressed &&
+                          canSubmit &&
+                          !isLookupPending &&
+                          styles.buttonPressed,
                       ]}
                     >
-                      சமர்ப்பிக்கவும்
-                    </Text>
-                  </Pressable>
-                </ScrollView>
+                      {isLookupPending ? (
+                        <View style={styles.submitButtonInner}>
+                          <ActivityIndicator color="#FFFFFF" size="small" />
+                          <Text style={styles.buttonText}>தேடுகிறது…</Text>
+                        </View>
+                      ) : (
+                        <Text
+                          style={[
+                            styles.buttonText,
+                            !canSubmit && styles.buttonTextDisabled,
+                          ]}
+                        >
+                          சமர்ப்பிக்கவும்
+                        </Text>
+                      )}
+                    </Pressable>
+
+                    {normalizeBoothNo(selectedBoothNumber) ? (
+                      boothVoterCountsLoading ? (
+                        <View
+                          style={[
+                            styles.boothStatsCard,
+                            styles.boothStatsCardNonInteractive,
+                          ]}
+                        >
+                          <View style={styles.invalidAccessHintRow}>
+                            <ActivityIndicator size="small" color="#2563EB" />
+                            <Text style={styles.boothStatsCardMuted}>
+                              Loading booth totals…
+                            </Text>
+                          </View>
+                        </View>
+                      ) : boothVoterCounts ? (
+                        <Pressable
+                          onPress={() => void openVerifiedListModal()}
+                          accessibilityRole="button"
+                          accessibilityLabel="View verified voters for this booth"
+                          style={({ pressed }) => [
+                            styles.boothStatsCard,
+                            pressed && styles.boothStatsCardPressed,
+                          ]}
+                        >
+                          <View style={styles.boothStatsCardHeader}>
+                            <Text style={styles.boothStatsCardTitle}>
+                              Local booth totals
+                            </Text>
+                            <Feather
+                              name="chevron-right"
+                              size={22}
+                              color="#2563EB"
+                            />
+                          </View>
+                          <Text style={styles.boothStatsCardBody}>
+                            Booth {boothVoterCounts.booth}:{" "}
+                            <Text style={styles.invalidAccessCountsEmphasis}>
+                              {boothVoterCounts.verified}
+                            </Text>{" "}
+                            verified (status 1) of{" "}
+                            <Text style={styles.invalidAccessCountsEmphasis}>
+                              {boothVoterCounts.total}
+                            </Text>{" "}
+                            voters.
+                          </Text>
+                          <Text style={styles.boothStatsCardBodyDevice}>
+                            This device (
+                            <Text style={styles.invalidAccessCountsEmphasis}>
+                              {boothVoterCounts.verifiedOnDevice}
+                            </Text>
+                            ) verified for this booth (local{" "}
+                            <Text style={styles.boothStatsMonoHint}>
+                              verified_by_device_id
+                            </Text>
+                            ).
+                          </Text>
+                          <Text style={styles.boothStatsCardHint}>
+                            Tap to see verified data for this booth by this
+                            device.
+                          </Text>
+                        </Pressable>
+                      ) : null
+                    ) : null}
+                  </ScrollView>
+                )}
               </View>
             )}
           </View>
         </View>
       </KeyboardAvoidingView>
 
-      <Modal
+      {/* <Modal
         visible={isBoothModalVisible}
         transparent
         animationType="slide"
@@ -662,7 +1346,7 @@ export default function Home() {
             </ScrollView>
           </View>
         </View>
-      </Modal>
+      </Modal> */}
 
       <Modal
         visible={isNoDataModalVisible}
@@ -709,6 +1393,126 @@ export default function Home() {
                 <Text style={styles.buttonText}>சரி</Text>
               </Pressable>
             </View>
+          </View>
+        </View>
+      </Modal>
+
+      <Modal
+        visible={voterListRefreshModalVisible}
+        transparent
+        animationType="fade"
+        onRequestClose={closeVoterListRefreshModal}
+      >
+        <View style={styles.modalOverlay}>
+          <Pressable
+            style={StyleSheet.absoluteFill}
+            onPress={closeVoterListRefreshModal}
+          />
+          <View style={styles.modalCard} pointerEvents="box-none">
+            <Text style={styles.modalTitle}>Booth list updated</Text>
+            <Text style={styles.modalEmptyText}>
+              Saving server data to the local database…
+            </Text>
+            <View style={styles.verifiedListLoadingWrap}>
+              <ActivityIndicator size="large" color={REFRESH_SPINNER_COLOR} />
+            </View>
+          </View>
+        </View>
+      </Modal>
+
+      <Modal
+        visible={verifiedListModalVisible}
+        transparent
+        animationType="fade"
+        onRequestClose={closeVerifiedListModal}
+      >
+        <View style={styles.modalOverlay}>
+          <Pressable
+            style={StyleSheet.absoluteFill}
+            onPress={closeVerifiedListModal}
+          />
+          <View style={styles.modalCard}>
+            <View style={styles.modalHeader}>
+              <Text style={styles.modalTitle}>
+                Your device — booth {normalizeBoothNo(selectedBoothNumber)}
+              </Text>
+              <Pressable
+                style={({ pressed }) => [
+                  styles.modalCloseButton,
+                  pressed && styles.modalCloseButtonPressed,
+                ]}
+                onPress={closeVerifiedListModal}
+                accessibilityRole="button"
+                accessibilityLabel="Close verified list"
+              >
+                <Feather name="x" size={20} color="#1E3A8A" />
+              </Pressable>
+            </View>
+
+            {verifiedListDeviceId ? (
+              <Text
+                style={styles.modalDeviceIdCaption}
+                numberOfLines={1}
+                ellipsizeMode="middle"
+              >
+                Device: {verifiedListDeviceId}
+              </Text>
+            ) : null}
+
+            {verifiedListLoading ? (
+              <View style={styles.verifiedListLoadingWrap}>
+                <ActivityIndicator size="large" color={REFRESH_SPINNER_COLOR} />
+                <Text style={styles.modalLoadingText}>Loading…</Text>
+              </View>
+            ) : (
+              <>
+                <View style={styles.verifiedTableHeader}>
+                  <Text style={styles.verifiedTableHeaderCell}>sr</Text>
+                  <Text
+                    style={[
+                      styles.verifiedTableHeaderCell,
+                      styles.verifiedTableHeaderCellWide,
+                    ]}
+                  >
+                    verified_at
+                  </Text>
+                </View>
+                <FlatList
+                  data={verifiedListRows}
+                  keyExtractor={(item) => String(item.sr)}
+                  style={styles.verifiedListFlatList}
+                  contentContainerStyle={
+                    verifiedListRows.length === 0
+                      ? styles.verifiedListEmptyContent
+                      : undefined
+                  }
+                  ListEmptyComponent={
+                    <Text style={styles.modalEmptyText}>
+                      {!verifiedListDeviceId
+                        ? "No device ID in session — cannot list your verifications."
+                        : "No rows for this booth with your device's verified_by_device_id."}
+                    </Text>
+                  }
+                  renderItem={({ item }) => (
+                    <View style={styles.verifiedTableRow}>
+                      <Text style={styles.verifiedTableCell}>{item.sr}</Text>
+                      <Text
+                        style={[
+                          styles.verifiedTableCell,
+                          styles.verifiedTableCellWide,
+                        ]}
+                        numberOfLines={2}
+                      >
+                        {item.verified_at != null &&
+                        String(item.verified_at).trim() !== ""
+                          ? String(item.verified_at)
+                          : "—"}
+                      </Text>
+                    </View>
+                  )}
+                />
+              </>
+            )}
           </View>
         </View>
       </Modal>
@@ -854,9 +1658,186 @@ const styles = StyleSheet.create({
   },
   entryScroll: {
     flex: 1,
+    minHeight: 0,
   },
   entryScrollContent: {
     paddingBottom: 8,
+  },
+  accessCheckContainer: {
+    flex: 1,
+    minHeight: 200,
+    alignItems: "center",
+    justifyContent: "center",
+    paddingVertical: 32,
+    gap: 14,
+  },
+  accessCheckText: {
+    fontSize: 15,
+    fontWeight: "700",
+    color: "#6B7280",
+  },
+  invalidAccessScrollContent: {
+    flexGrow: 1,
+    justifyContent: "center",
+    alignItems: "center",
+    paddingHorizontal: 24,
+    paddingVertical: 32,
+  },
+  invalidAccessBlock: {
+    alignItems: "center",
+    maxWidth: 300,
+  },
+  invalidAccessIconWrap: {
+    width: 88,
+    height: 88,
+    borderRadius: 44,
+    backgroundColor: "#FEF2F2",
+    alignItems: "center",
+    justifyContent: "center",
+    marginBottom: 16,
+  },
+  invalidAccessTitle: {
+    fontSize: 20,
+    fontWeight: "900",
+    color: "#991B1B",
+    textAlign: "center",
+    letterSpacing: 0.2,
+  },
+  invalidAccessSubtitle: {
+    marginTop: 10,
+    fontSize: 14,
+    fontWeight: "600",
+    color: "#6B7280",
+    textAlign: "center",
+    lineHeight: 20,
+    paddingHorizontal: 8,
+  },
+  invalidAccessCountsEmphasis: {
+    fontWeight: "900",
+    color: "#374151",
+  },
+  boothStatsCard: {
+    marginTop: 16,
+    padding: 14,
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: "#DBEAFE",
+    backgroundColor: "#F8FAFC",
+  },
+  boothStatsCardNonInteractive: {
+    opacity: 1,
+  },
+  boothStatsCardPressed: {
+    opacity: 0.92,
+    backgroundColor: "#EFF6FF",
+  },
+  boothStatsCardHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    marginBottom: 8,
+  },
+  boothStatsCardTitle: {
+    fontSize: 15,
+    fontWeight: "900",
+    color: "#1E3A8A",
+  },
+  boothStatsCardBody: {
+    fontSize: 14,
+    fontWeight: "600",
+    color: "#6B7280",
+    lineHeight: 20,
+  },
+  boothStatsCardBodyDevice: {
+    marginTop: 10,
+    fontSize: 13,
+    fontWeight: "600",
+    color: "#4B5563",
+    lineHeight: 19,
+  },
+  boothStatsMonoHint: {
+    fontFamily: Platform.select({ ios: "Menlo", android: "monospace" }),
+    fontSize: 11,
+    fontWeight: "700",
+    color: "#6B7280",
+  },
+  boothStatsCardMuted: {
+    fontSize: 14,
+    fontWeight: "600",
+    color: "#6B7280",
+  },
+  boothStatsCardHint: {
+    marginTop: 8,
+    fontSize: 12,
+    fontWeight: "700",
+    color: "#2563EB",
+  },
+  verifiedListLoadingWrap: {
+    alignItems: "center",
+    paddingVertical: 24,
+    gap: 12,
+  },
+  verifiedListFlatList: {
+    maxHeight: 320,
+  },
+  verifiedListEmptyContent: {
+    flexGrow: 1,
+    justifyContent: "center",
+    paddingVertical: 16,
+  },
+  verifiedTableHeader: {
+    flexDirection: "row",
+    borderBottomWidth: 1,
+    borderBottomColor: "#E5E7EB",
+    paddingBottom: 8,
+    marginBottom: 4,
+  },
+  verifiedTableHeaderCell: {
+    flex: 0.35,
+    fontSize: 12,
+    fontWeight: "900",
+    color: "#374151",
+    textTransform: "uppercase",
+    letterSpacing: 0.5,
+  },
+  verifiedTableHeaderCellWide: {
+    flex: 0.65,
+  },
+  verifiedTableRow: {
+    flexDirection: "row",
+    paddingVertical: 10,
+    borderBottomWidth: 1,
+    borderBottomColor: "#F3F4F6",
+  },
+  verifiedTableCell: {
+    flex: 0.35,
+    fontSize: 14,
+    fontWeight: "700",
+    color: "#111827",
+  },
+  verifiedTableCellWide: {
+    flex: 0.65,
+    fontWeight: "600",
+    color: "#4B5563",
+  },
+  invalidAccessHintRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    marginTop: 12,
+    gap: 6,
+  },
+  invalidAccessHintIcon: {
+    marginTop: 2,
+  },
+  invalidAccessHint: {
+    fontSize: 14,
+    fontWeight: "600",
+    color: "#6B7280",
+    textAlign: "center",
+  },
+  invalidAccessRefreshButton: {
+    alignSelf: "stretch",
+    marginTop: 18,
   },
   entryTitle: {
     fontSize: 18,
@@ -1063,6 +2044,11 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
   },
+  submitButtonInner: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+  },
   buttonPressed: {
     opacity: 0.92,
   },
@@ -1149,6 +2135,12 @@ const styles = StyleSheet.create({
     fontWeight: "600",
     marginBottom: 12,
     textAlign: "center",
+  },
+  modalDeviceIdCaption: {
+    fontSize: 12,
+    fontWeight: "700",
+    color: "#6B7280",
+    marginBottom: 8,
   },
   modalOption: {
     minHeight: 48,

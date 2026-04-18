@@ -14,7 +14,7 @@ type AuthUser = {
   name: string;
   mobileNumber: string;
   deviceId: string;
-  userType: "user" | "admin";
+  serialNumber: string;
 };
 
 type AuthContextValue = {
@@ -42,12 +42,13 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       const next: AuthUser | null =
         typeof parsed?.name === "string" &&
         typeof parsed?.mobileNumber === "string" &&
-        typeof parsed?.deviceId === "string"
+        typeof parsed?.deviceId === "string" &&
+        typeof parsed?.serialNumber === "string"
           ? {
               name: parsed.name,
               mobileNumber: parsed.mobileNumber,
               deviceId: parsed.deviceId,
-              userType: parsed.userType === "admin" ? "admin" : "user",
+              serialNumber: parsed.serialNumber,
             }
           : null;
       setUser(next);

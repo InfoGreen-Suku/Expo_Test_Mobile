@@ -2,20 +2,24 @@ import { useAuth } from "@/auth/AuthContext";
 import { getDistinctBhagNos } from "@/sqlite/votersDb";
 import Feather from "@expo/vector-icons/Feather";
 import AsyncStorage from "@react-native-async-storage/async-storage";
-import React, { useEffect, useMemo, useState } from "react";
+import axios from "axios";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 import {
-    ActivityIndicator,
-    FlatList,
-    KeyboardAvoidingView,
-    Modal,
-    Platform,
-    Pressable,
-    ScrollView,
-    StyleSheet,
-    Text,
-    TextInput,
-    View,
+  ActivityIndicator,
+  FlatList,
+  KeyboardAvoidingView,
+  Modal,
+  Platform,
+  Pressable,
+  RefreshControl,
+  ScrollView,
+  StyleSheet,
+  Text,
+  TextInput,
+  View,
 } from "react-native";
+
+const REFRESH_SPINNER_COLOR = "#2563EB";
 
 const SELECTED_BOOTH_STORAGE_KEY = "selectedBoothNumber";
 const BOOTH_NUMBERS_STORAGE_KEY = "boothNumbersList";
@@ -23,8 +27,9 @@ const BOOTH_NUMBERS_STORAGE_KEY = "boothNumbersList";
 type DeviceListItem = {
   id: number;
   name: string;
-  deviceId: string;
-  phoneNumber: string;
+  deviceID: string;
+  mobileNumber: string;
+  userType: "user" | "admin";
 };
 
 export default function AdminHome() {
@@ -36,6 +41,29 @@ export default function AdminHome() {
   const [isLoadingBooths, setIsLoadingBooths] = useState(false);
   const [boothSearchValue, setBoothSearchValue] = useState("");
   const [deviceSearchValue, setDeviceSearchValue] = useState("");
+  const [users, setUsers] = useState<DeviceListItem[]>([]);
+  const [selectedUserId, setSelectedUserId] = useState<string | null>(null);
+  const [refreshingUsers, setRefreshingUsers] = useState(false);
+
+  const loadUsers = useCallback(async () => {
+    try {
+      const response = await axios.get(
+        "https://69e30f5f3327837a1552cc48.mockapi.io/voter/user",
+      );
+      setUsers(response.data);
+    } catch (error) {
+      console.log("Failed to load users:", error);
+    }
+  }, []);
+
+  const onRefreshUsers = useCallback(async () => {
+    setRefreshingUsers(true);
+    try {
+      await loadUsers();
+    } finally {
+      setRefreshingUsers(false);
+    }
+  }, [loadUsers]);
 
   const filteredBoothNumbers = useMemo(() => {
     const searchValue = boothSearchValue.trim();
@@ -63,8 +91,8 @@ export default function AdminHome() {
     };
 
     void loadSavedBoothState();
-  }, []);
-
+    void loadUsers();
+  }, [loadUsers]);
   const loadBoothNumbers = async () => {
     if (boothNumbers.length > 0 || isLoadingBooths) return;
 
@@ -98,8 +126,10 @@ export default function AdminHome() {
     }
   };
 
-  const handleOpenBoothModal = () => {
+  const handleOpenBoothModal = (id: string) => {
+    setSelectedUserId(id);
     setIsBoothModalVisible(true);
+
     void loadBoothNumbers();
   };
 
@@ -110,78 +140,35 @@ export default function AdminHome() {
 
   const handleBoothSelect = async (boothNumber: string) => {
     try {
-      setSelectedBoothNumber(boothNumber);
+      const response = await axios.put(
+        `https://69e30f5f3327837a1552cc48.mockapi.io/voter/user/${selectedUserId}`,
+        {
+          boothNumber,
+          status: 1,
+          maxTime: "06:30:00PM",
+        },
+      );
+      console.log("response", response.data);
+      // setSelectedBoothNumber(boothNumber);
       handleCloseBoothModal();
     } catch (error) {
       console.log("Failed to save booth number:", error);
     }
   };
 
-  const handleLogout = async () => {
-    try {
-      await AsyncStorage.multiRemove([SELECTED_BOOTH_STORAGE_KEY, "authUser"]);
-    } finally {
-      await signOutLocal();
-    }
-  };
-
-  const dummyDevices: DeviceListItem[] = [
-    {
-      id: 1,
-      name: "Arun Kumar",
-      deviceId: "DEV-8F3A-21C9",
-      phoneNumber: "9876543210",
-    },
-    {
-      id: 2,
-      name: "Priya Sharma",
-      deviceId: "DEV-19B7-4D02",
-      phoneNumber: "9123456780",
-    },
-    {
-      id: 3,
-      name: "Mohammed Ali",
-      deviceId: "DEV-77D1-A5EF",
-      phoneNumber: "9001122334",
-    },
-    {
-      id: 4,
-      name: "Lakshmi Devi",
-      deviceId: "DEV-2C0E-9B31",
-      phoneNumber: "9988776655",
-    },
-    {
-      id: 5,
-      name: "Rajesh Kumar",
-      deviceId: "DEV-3C0E-9B31",
-      phoneNumber: "9988776655",
-    },
-    {
-      id: 6,
-      name: "Suresh Kumar",
-      deviceId: "DEV-3C0E-9B31",
-      phoneNumber: "9988776655",
-    },
-    {
-      id: 7,
-      name: "Rajesh Kumar",
-      deviceId: "DEV-3C0E-9B31",
-      phoneNumber: "9988776655",
-    },
-  ];
-
   const filteredDevices = useMemo(() => {
+    const nonAdmins = users.filter((item) => item.userType === "user");
     const q = deviceSearchValue.trim().toLowerCase();
-    if (!q) return dummyDevices;
+    if (!q) return nonAdmins;
 
-    return dummyDevices.filter((item) => {
+    return nonAdmins.filter((item) => {
       return (
         item.name.toLowerCase().includes(q) ||
-        item.deviceId.toLowerCase().includes(q) ||
-        item.phoneNumber.toLowerCase().includes(q)
+        item.deviceID.toLowerCase().includes(q) ||
+        item.mobileNumber.toLowerCase().includes(q)
       );
     });
-  }, [deviceSearchValue]);
+  }, [users, deviceSearchValue]);
 
   return (
     <View style={styles.screen}>
@@ -195,7 +182,7 @@ export default function AdminHome() {
             <View style={styles.hero}>
               <View style={styles.heroTopRow}>
                 <Text style={styles.heroTitle}>Home</Text>
-                <Pressable
+                {/* <Pressable
                   style={({ pressed }) => [
                     styles.logoutButton,
                     pressed && styles.logoutButtonPressed,
@@ -205,7 +192,7 @@ export default function AdminHome() {
                 >
                   <Feather name="log-out" size={18} color="#FFFFFF" />
                   <Text style={styles.logoutButtonText}>Logout</Text>
-                </Pressable>
+                </Pressable> */}
               </View>
             </View>
 
@@ -229,12 +216,22 @@ export default function AdminHome() {
               </View>
 
               <FlatList
+                style={styles.deviceList}
                 data={filteredDevices}
                 keyExtractor={(item) => item.id.toString()}
                 contentContainerStyle={styles.deviceListContent}
                 showsVerticalScrollIndicator={false}
+                refreshControl={
+                  <RefreshControl
+                    refreshing={refreshingUsers}
+                    onRefresh={onRefreshUsers}
+                    tintColor={REFRESH_SPINNER_COLOR}
+                    colors={[REFRESH_SPINNER_COLOR]}
+                    progressBackgroundColor="#FFFFFF"
+                  />
+                }
                 ListEmptyComponent={() => {
-                  const hasAnyDevices = dummyDevices.length > 0;
+                  const hasAnyDevices = users.length > 0;
                   const hasSearch = deviceSearchValue.trim().length > 0;
 
                   if (!hasAnyDevices) {
@@ -249,7 +246,11 @@ export default function AdminHome() {
                     );
                   }
 
-                  return null;
+                  return (
+                    <Text style={styles.modalEmptyText}>
+                      No users in this list.
+                    </Text>
+                  );
                 }}
                 renderItem={({ item }) => (
                   <Pressable
@@ -257,7 +258,7 @@ export default function AdminHome() {
                       styles.deviceCard,
                       pressed && styles.deviceCardPressed,
                     ]}
-                    onPress={handleOpenBoothModal}
+                    onPress={() => handleOpenBoothModal(item.id.toString())}
                     accessibilityRole="button"
                     accessibilityLabel={`Open booth selection for ${item.name}`}
                   >
@@ -265,13 +266,13 @@ export default function AdminHome() {
                     <View style={styles.deviceMetaRow}>
                       <Text style={styles.deviceMetaLabel}>Device ID</Text>
                       <Text style={styles.deviceMetaValue}>
-                        {item.deviceId}
+                        {item.deviceID}
                       </Text>
                     </View>
                     <View style={styles.deviceMetaRow}>
                       <Text style={styles.deviceMetaLabel}>Phone</Text>
                       <Text style={styles.deviceMetaValue}>
-                        {item.phoneNumber}
+                        {item.mobileNumber}
                       </Text>
                     </View>
                   </Pressable>
@@ -497,6 +498,11 @@ const styles = StyleSheet.create({
   entryCard: {
     marginTop: 5,
     flex: 1,
+    minHeight: 0,
+  },
+  deviceList: {
+    flex: 1,
+    minHeight: 0,
   },
   entryScroll: {
     flex: 1,

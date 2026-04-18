@@ -23,7 +23,6 @@
     },
     "plugins": [
       "expo-router",
-      "expo-sqlite",
       [
         "expo-splash-screen",
         {
@@ -42,10 +41,6 @@
           "mode": "production"
         }
       ],
-      "expo-camera",
-      "expo-audio",
-      "expo-video",
-      "expo-share-intent",
       "expo-sqlite",
       "expo-asset"
     ],

@@ -6,7 +6,6 @@ import {
   BackHandler,
   KeyboardAvoidingView,
   Platform,
-  Pressable,
   ScrollView,
   Text,
   TextInput,
@@ -15,6 +14,7 @@ import {
 } from "react-native";
 
 import { useAuth } from "@/auth/AuthContext";
+import axios from "axios";
 import DeviceInfo from "react-native-device-info";
 import { styles } from "./style";
 export default function Login() {
@@ -23,12 +23,13 @@ export default function Login() {
   const s = styles as any;
   const [name, setName] = useState("");
   const [mobileNumber, setMobileNumber] = useState("");
-  const [userType, setUserType] = useState<"user" | "admin">("user");
 
   const [mobileNumberError, setMobileNumberError] = useState("");
   const [nameError, setNameError] = useState("");
-  const [userTypeError, setUserTypeError] = useState("");
   const [deviceID, setDeviceID] = useState("");
+
+  const [serialNumber, setSerialNumber] = useState("");
+  const [serialNumberError, setSerialNumberError] = useState("");
 
   useEffect(() => {
     getAllDeviceInfo();
@@ -57,9 +58,10 @@ export default function Login() {
   };
 
   const handleRegister = async () => {
-    if (name === "" || mobileNumber === "") {
+    if (name === "" || mobileNumber === "" || serialNumber === "") {
       setNameError("பெயர் தேவையானவை");
       setMobileNumberError("தொலைபேசி எண் தேவையானவை");
+      setSerialNumberError("வரிசை எண் தேவையானவை");
       return;
     }
     if (mobileNumber.trim().length !== 10) {
@@ -67,36 +69,35 @@ export default function Login() {
       return;
     }
 
-    // Admin-only restriction (User has no restriction)
-    if (userType === "admin") {
-      const DEFAULT_ADMIN = {
-        name: "admin",
-        mobileNumber: "9874563210",
-      } as const;
-
-      const nameOk =
-        name.trim().toLowerCase() === DEFAULT_ADMIN.name.toLowerCase();
-      const mobileOk = mobileNumber.trim() === DEFAULT_ADMIN.mobileNumber;
-
-      if (!nameOk || !mobileOk) {
-        setUserTypeError("Admin விவரங்கள் தவறாக உள்ளது");
-        return;
-      }
-    }
-
     const payload = {
       name,
       mobileNumber,
       deviceID,
+      serialNumber,
+      userType: "user",
     };
-
     console.log("payload", payload);
-    await signInLocal({
-      name: payload.name,
-      mobileNumber: payload.mobileNumber,
-      deviceId: payload.deviceID,
-      userType,
-    });
+
+    try {
+      const response = await axios.post(
+        "https://voters.infogreen.co/api/register.php",
+        payload,
+      );
+
+      console.log("response", response);
+      if (response.data.status === "success") {
+        await signInLocal({
+          name: response.data.data.name,
+          mobileNumber: response.data.data.mobileNumber,
+          deviceId: response.data.data.deviceID,
+          serialNumber: response.data.data.serialNumber,
+        });
+      } else {
+        console.log("error1", response.data.message);
+      }
+    } catch (error) {
+      console.log("error", error);
+    }
   };
 
   return (
@@ -121,61 +122,6 @@ export default function Login() {
             </View>
 
             <View style={styles.formContainer}>
-              <View style={styles.inputWrapper}>
-                <View style={s.userTypeToggle}>
-                  <Pressable
-                    style={({ pressed }) => [
-                      s.userTypeOption,
-                      userType === "user" && s.userTypeOptionSelected,
-                      pressed && s.userTypeOptionPressed,
-                    ]}
-                    onPress={() => {
-                      setUserType("user");
-                      setName("");
-                      setMobileNumber("");
-                      setUserTypeError("");
-                      setNameError("");
-                      setMobileNumberError("");
-                    }}
-                  >
-                    <Text
-                      style={[
-                        s.userTypeOptionText,
-                        userType === "user" && s.userTypeOptionTextSelected,
-                      ]}
-                    >
-                      User
-                    </Text>
-                  </Pressable>
-                  <Pressable
-                    style={({ pressed }) => [
-                      s.userTypeOption,
-                      userType === "admin" && s.userTypeOptionSelected,
-                      pressed && s.userTypeOptionPressed,
-                    ]}
-                    onPress={() => {
-                      setUserType("admin");
-                      setName("");
-                      setMobileNumber("");
-                      setUserTypeError("");
-                      setNameError("");
-                      setMobileNumberError("");
-                    }}
-                  >
-                    <Text
-                      style={[
-                        s.userTypeOptionText,
-                        userType === "admin" && s.userTypeOptionTextSelected,
-                      ]}
-                    >
-                      Admin
-                    </Text>
-                  </Pressable>
-                </View>
-                {userTypeError ? (
-                  <Text style={styles.errorText}>{userTypeError}</Text>
-                ) : null}
-              </View>
               {/* Name Input */}
               <View style={styles.inputWrapper}>
                 <Text style={styles.inputLabel}>பெயர்</Text>
@@ -195,7 +141,6 @@ export default function Login() {
                     onChangeText={(text) => {
                       setName(text);
                       setNameError("");
-                      setUserTypeError("");
                     }}
                     onFocus={() => setNameError("")}
                   />
@@ -228,7 +173,6 @@ export default function Login() {
                         .slice(0, 10);
                       setMobileNumber(filteredText);
                       setMobileNumberError("");
-                      setUserTypeError("");
                     }}
                     maxLength={10}
                     onFocus={() => setMobileNumberError("")}
@@ -236,6 +180,35 @@ export default function Login() {
                 </View>
                 {mobileNumberError ? (
                   <Text style={styles.errorText}>{mobileNumberError}</Text>
+                ) : null}
+              </View>
+
+              {/* Serial Number Input */}
+              <View style={styles.inputWrapper}>
+                <Text style={styles.inputLabel}>வரிசை எண்</Text>
+                <View style={styles.inputContainer}>
+                  <Feather
+                    name="list"
+                    size={20}
+                    color="#6B7280"
+                    style={styles.inputIcon}
+                  />
+
+                  <TextInput
+                    style={styles.input}
+                    placeholder="வரிசை எண்"
+                    placeholderTextColor="#9CA3AF"
+                    keyboardType="default"
+                    value={serialNumber}
+                    onChangeText={(text) => {
+                      setSerialNumber(text);
+                      setSerialNumberError("");
+                    }}
+                    onFocus={() => setSerialNumberError("")}
+                  />
+                </View>
+                {serialNumberError ? (
+                  <Text style={styles.errorText}>{serialNumberError}</Text>
                 ) : null}
               </View>
 
